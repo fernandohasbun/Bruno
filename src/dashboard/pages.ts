@@ -411,6 +411,7 @@ export interface LeadsPageModel {
     inSequence: number;
     replied: number;
     interested: number;
+    finished: number;
     suppressed: number;
   };
   syncLabel?: string;
@@ -444,20 +445,29 @@ function brunoReadCell(row: CrmRow, now: Date) {
 }
 
 export function renderLeadsPage(m: LeadsPageModel, now: Date) {
-  // Funnel order: who was imported, who we emailed, who stayed silent, then what
-  // came back. "in sequence" sits late because Instantly marks every imported
-  // lead active, so it counts the import list rather than anyone contacted.
-  const tabs: Array<{ value: LeadsPageModel["view"]; label: string; count?: number }> = [
-    { value: "all", label: "all", count: m.summary.total },
+  // Funnel order: who we emailed, who stayed silent, then what came back.
+  //
+  // "in sequence" is deliberately absent — it tests status IN (1,2) and Instantly
+  // marks every imported lead active, so it returned 2,495 of 2,499 rows. As a
+  // filter it was indistinguishable from "all". The predicate still works by URL
+  // for anything already linking to it.
+  //
+  // Empty views are dropped too: a tab reading "needs read 0" costs a row of
+  // chrome to say nothing. "all" and the current view always survive, so the
+  // full roster stays reachable and the selected tab never vanishes underneath.
+  const allTabs: Array<{ value: LeadsPageModel["view"]; label: string; count: number }> = [
     { value: "contacted", label: "contacted", count: m.summary.contacted },
     { value: "no-reply", label: "no reply", count: m.summary.noReply },
     { value: "away", label: "away", count: m.summary.away },
     { value: "needs-read", label: "needs read", count: m.summary.needsRead },
     { value: "replied", label: "replied", count: m.summary.replied },
     { value: "interested", label: "interested", count: m.summary.interested },
-    { value: "in-sequence", label: "in sequence", count: m.summary.inSequence },
-    { value: "finished", label: "finished" },
+    { value: "finished", label: "finished", count: m.summary.finished },
     { value: "suppressed", label: "suppressed", count: m.summary.suppressed }
+  ];
+  const tabs = [
+    { value: "all" as LeadsPageModel["view"], label: "all", count: m.summary.total },
+    ...allTabs.filter((tab) => tab.count > 0 || tab.value === m.view)
   ];
   const table =
     m.rows.length === 0
@@ -499,9 +509,7 @@ export function renderLeadsPage(m: LeadsPageModel, now: Date) {
       ${tabs
         .map(
           (tab) =>
-            `<a class="crm-tab${m.view === tab.value ? " sel" : ""}" style="text-decoration:none" href="${escapeHtml(pageHref("/dashboard/leads", { view: tab.value, q: m.search }))}">${tab.label}${
-              tab.count === undefined ? "" : ` <span class="mono muted">${tab.count}</span>`
-            }</a>`
+            `<a class="crm-tab${m.view === tab.value ? " sel" : ""}" style="text-decoration:none" href="${escapeHtml(pageHref("/dashboard/leads", { view: tab.value, q: m.search }))}">${tab.label} <span class="mono muted">${tab.count}</span></a>`
         )
         .join("")}
       <input class="crm-search" name="q" type="search" value="${escapeHtml(m.search ?? "")}" placeholder="search the complete CRM…" />
