@@ -825,6 +825,36 @@ export async function stopLeadSequence(input: { email?: string; leadId?: string;
 }
 
 /** Set a lead's CRM pipeline status (lt_interest_status) from the console. */
+/**
+ * Instantly's pipeline value for one of Bruno's reads, or undefined when Bruno's
+ * verdict says nothing about the pipeline.
+ *
+ * Instantly sets interest_status = 1 ("interested") on any reply, without reading
+ * it — an out-of-office autoresponder and a hard compliance-based refusal both
+ * land there. Bruno did read them, so its conclusion is the better value.
+ *
+ * question / objection / not_now stay undefined on purpose: those leads are still
+ * live, and none of Instantly's codes means "in conversation".
+ */
+export function interestValueForIntent(intent: string): number | undefined {
+  switch (intent) {
+    case "out_of_office":
+      return 0;
+    case "positive":
+      return 1;
+    case "negative":
+    case "unsubscribe":
+      return -1;
+    default:
+      return undefined;
+  }
+}
+
+/** Pipeline stages a human moved the lead into; Bruno must not walk them back. */
+export function isHumanAdvancedInterest(status?: number) {
+  return status !== undefined && status >= 2;
+}
+
 export async function setLeadInterest(input: { email: string; interestValue: number; campaignId?: string }) {
   await instantlyFetch("/api/v2/leads/update-interest-status", {
     method: "POST",

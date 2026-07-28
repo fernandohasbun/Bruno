@@ -5,7 +5,14 @@ import { markEventProcessed } from "../db/events.js";
 import { saveDraft, saveReplyClassification } from "../db/replyRecords.js";
 import { saveSuppression } from "../db/suppressions.js";
 import { cancelPendingRetargets, scheduleRetarget } from "../db/retargets.js";
-import { stopLeadSequence, suppressLead } from "../integrations/instantly.js";
+import {
+  getLeadRecord,
+  interestValueForIntent,
+  isHumanAdvancedInterest,
+  setLeadInterest,
+  stopLeadSequence,
+  suppressLead
+} from "../integrations/instantly.js";
 import { notifyAlert, notifyHotReply } from "../integrations/notify.js";
 import { enqueueJob, type QueueJob } from "../queue/queue.js";
 import type { InstantlyEvent } from "../types/domain.js";
@@ -64,6 +71,10 @@ export async function processInstantlyEventJob(job: QueueJob) {
     classification,
     rawThread: threadText
   });
+
+  // Bruno owns the verdict. Instantly marks any reply "interested" without
+  // reading it, so this overwrites its guess with what the reply actually said.
+  await syncInterestToInstantly(event, classification.intent);
 
   // An autoresponder is not a human decision: the sequence keeps running, nobody
   // gets paged, and no reply is drafted today. If it named a return date we hold
@@ -138,6 +149,36 @@ export async function processInstantlyEventJob(job: QueueJob) {
   }
 
   await markEventProcessed(eventId);
+}
+
+/**
+ * Push Bruno's read into Instantly's pipeline field so the provider's own
+ * reporting reflects what the reply said rather than merely that one arrived.
+ *
+ * Two things are deliberately left alone: intents with no pipeline meaning
+ * (question, objection, not_now — still live conversations), and leads a human
+ * already advanced to a meeting or close, which Bruno must never walk back.
+ *
+ * Never fatal. Failing to annotate the provider must not cost us the
+ * classification and draft we already produced.
+ */
+async function syncInterestToInstantly(event: InstantlyEvent, intent: string) {
+  const interestValue = interestValueForIntent(intent);
+  if (interestValue === undefined || !event.email) return;
+
+  try {
+    const record = await getLeadRecord({ email: event.email, campaignId: event.campaignId });
+    if (isHumanAdvancedInterest(record?.interestStatus)) return;
+    if (record?.interestStatus === interestValue) return;
+
+    await setLeadInterest({
+      email: event.email,
+      interestValue,
+      campaignId: event.campaignId
+    });
+  } catch {
+    // Provider annotation is best-effort; Bruno's own record is authoritative.
+  }
 }
 
 /**
