@@ -7,7 +7,8 @@ import {
 } from "../src/campaigns/kintaPersonaCampaigns.js";
 import { retargetRunAfter } from "../src/db/retargets.js";
 import { normalizeInstantlyEvent } from "../src/webhooks/normalizeInstantlyEvent.js";
-import type { ReplyClassification } from "../src/types/domain.js";
+import { inboxSection, isReplyIntent } from "../src/dashboard/routes.js";
+import type { ReplyClassification, ReplyIntent } from "../src/types/domain.js";
 
 /** The six autoresponders the P2 Legal campaign actually received, verbatim. */
 const REAL_AUTORESPONDERS = [
@@ -139,6 +140,41 @@ test("live campaign names still resolve to a persona", () => {
 
   assert.equal(findKintaPersonaByCampaignName("Kinta | P2 Legal | B2 | 2026-08"), undefined);
   assert.equal(findKintaPersonaByCampaignName(undefined), undefined);
+});
+
+test("every intent routes to exactly one inbox section", () => {
+  // The original bug: sections were picked by membership in two arrays, so
+  // out_of_office matched neither and rendered nowhere. Every intent must land.
+  const intents: ReplyIntent[] = [
+    "positive",
+    "question",
+    "objection",
+    "not_now",
+    "negative",
+    "unsubscribe",
+    "out_of_office",
+    "unclear"
+  ];
+  const sections = new Set<string>();
+  for (const intent of intents) {
+    const section = inboxSection(intent);
+    assert.ok(
+      ["waiting", "needs_read", "away", "handled"].includes(section),
+      `${intent} routed to an unknown section: ${section}`
+    );
+    sections.add(section);
+  }
+  assert.equal(inboxSection("out_of_office"), "away");
+  assert.equal(inboxSection("positive"), "waiting");
+  assert.equal(inboxSection("unclear"), "needs_read");
+  assert.equal(inboxSection("unsubscribe"), "handled");
+  // All four sections are reachable — none is dead code.
+  assert.equal(sections.size, 4);
+});
+
+test("stored intents outside the current set are recognised as such", () => {
+  assert.equal(isReplyIntent("out_of_office"), true);
+  assert.equal(isReplyIntent("some_future_intent"), false);
 });
 
 test("the reply subject reaches the classifier", () => {

@@ -37,6 +37,8 @@ import {
   listRecentDailyMetrics
 } from "../db/metrics.js";
 import { cachedFetch, deleteCachedValue } from "../db/cache.js";
+import { cancelRetargetById, listAwayLeads } from "../db/retargets.js";
+import type { ReplyIntent } from "../types/domain.js";
 import { clearFailedJobs, getFailedJobGroups, retryLatestFailedJob } from "../db/ops.js";
 import {
   getCrmLeadByEmail,
@@ -89,6 +91,7 @@ import {
   renderLearningPage,
   renderSearchPage,
   renderSystemPage,
+  type AwayModel,
   type CrmRow,
   type DraftCardModel,
   type ReplyFeedModel,
@@ -311,6 +314,53 @@ function agoLabel(minutes: number | undefined) {
 
 const HOT_INTENTS = ["positive", "question", "objection"];
 const HANDLED_INTENTS = ["not_now", "negative", "unsubscribe"];
+
+export type InboxSection = "waiting" | "needs_read" | "away" | "handled";
+
+const REPLY_INTENTS: ReplyIntent[] = [
+  "positive",
+  "question",
+  "objection",
+  "not_now",
+  "negative",
+  "unsubscribe",
+  "out_of_office",
+  "unclear"
+];
+
+/** Rows predate today's intent set, so narrow the stored text before routing it. */
+export function isReplyIntent(intent: string): intent is ReplyIntent {
+  return (REPLY_INTENTS as string[]).includes(intent);
+}
+
+/**
+ * Total intent -> section mapping. Every reply must land in exactly one place:
+ * the Inbox previously selected sections by membership in the two arrays above,
+ * so out_of_office matched neither, hit no branch, and rendered nowhere at all.
+ *
+ * The `never` assignment is the guard — adding a ninth ReplyIntent without
+ * giving it a section fails the build here instead of silently vanishing.
+ */
+export function inboxSection(intent: ReplyIntent): InboxSection {
+  switch (intent) {
+    case "positive":
+    case "question":
+    case "objection":
+      return "waiting";
+    case "unclear":
+      return "needs_read";
+    case "out_of_office":
+      return "away";
+    case "not_now":
+    case "negative":
+    case "unsubscribe":
+      return "handled";
+    default: {
+      const unrouted: never = intent;
+      throw new Error(`intent has no inbox section: ${String(unrouted)}`);
+    }
+  }
+}
 
 // ————— Live Instantly layer (cached, failure-tolerant) —————
 
@@ -612,12 +662,13 @@ export async function registerDashboard(app: FastifyInstance) {
   // Inbox — who replied, hottest first
   app.get("/dashboard/inbox", async (request, reply) => {
     if (!authorizePage(request, reply, "/dashboard/inbox")) return reply;
-    const [shell, drafts, feed, activity, pulse] = await Promise.all([
+    const [shell, drafts, feed, activity, pulse, awayRows] = await Promise.all([
       loadShellContext("inbox", "Inbox", true),
       listPendingDrafts(20),
       listRecentClassifications(40),
       listRecentApprovals(12),
-      loadCampaignPulse()
+      loadCampaignPulse(),
+      listAwayLeads(40)
     ]);
 
     const cards = drafts
@@ -625,8 +676,26 @@ export async function registerDashboard(app: FastifyInstance) {
       .sort(
         (a, b) => HOT_INTENTS.indexOf(a.intent) - HOT_INTENTS.indexOf(b.intent) || a.createdAt.localeCompare(b.createdAt)
       );
-    const needsRead = feed.filter((row) => row.intent === "unclear" && row.draft_status === null).slice(0, 10).map(toFeedModel);
-    const handled = feed.filter((row) => HANDLED_INTENTS.includes(row.intent)).slice(0, 15).map(toFeedModel);
+    // Sections come from the total mapping, so a reply cannot fall through them all.
+    const sectioned = feed.filter((row) => isReplyIntent(row.intent));
+    const needsRead = sectioned
+      .filter((row) => inboxSection(row.intent as ReplyIntent) === "needs_read" && row.draft_status === null)
+      .slice(0, 10)
+      .map(toFeedModel);
+    const handled = sectioned
+      .filter((row) => inboxSection(row.intent as ReplyIntent) === "handled")
+      .slice(0, 15)
+      .map(toFeedModel);
+    const away: AwayModel[] = awayRows.map((row) => ({
+      email: row.email,
+      companyName: row.company_name ?? undefined,
+      returnDate: row.ooo_return_date ? row.ooo_return_date.toISOString().slice(0, 10) : undefined,
+      alternateContact: row.ooo_alternate_contact ?? undefined,
+      prospectText: row.raw_thread ?? undefined,
+      createdAt: row.created_at,
+      retargetId: row.retarget_id ?? undefined,
+      retargetAt: row.retarget_run_after ?? undefined
+    }));
 
     // Enrich the actionable people with their live Instantly engagement.
     const engagement = await loadEngagementMap(
@@ -648,7 +717,9 @@ export async function registerDashboard(app: FastifyInstance) {
 
     return reply
       .type("text/html")
-      .send(renderShell(shell, renderInboxPage(cards, needsRead, handled, log, shell.generatedAt, pulse ?? undefined)));
+      .send(
+        renderShell(shell, renderInboxPage(cards, needsRead, handled, log, shell.generatedAt, pulse ?? undefined, away))
+      );
   });
 
   // Campaign — is the machine sending, and is it working?
@@ -1381,6 +1452,13 @@ export async function registerDashboard(app: FastifyInstance) {
   });
 
   // ————— Operations actions —————
+
+  app.post("/dashboard/api/retargets/:id/cancel", async (request, reply) => {
+    if (!isAuthorized(request)) return reply.code(401).send({ error: "not authorized" });
+    const { id } = request.params as { id: string };
+    await cancelRetargetById(id, "cancelled from dashboard");
+    return reply.send({ ok: true });
+  });
 
   app.post("/dashboard/api/ops/retry", async (request, reply) => {
     if (!isAuthorized(request)) return reply.code(401).send({ error: "not authorized" });

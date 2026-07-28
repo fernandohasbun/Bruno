@@ -54,6 +54,8 @@ const INTENT_STYLES: Record<string, { bg: string; fg: string }> = {
   not_now: { bg: "rgba(148,163,184,0.14)", fg: "#cbd5e1" },
   negative: { bg: "rgba(248,113,113,0.14)", fg: "#fca5a5" },
   unsubscribe: { bg: "rgba(248,113,113,0.2)", fg: "#f87171" },
+  // Distinct from unclear: an autoresponder is a confident read, not a puzzle.
+  out_of_office: { bg: "rgba(56,189,248,0.14)", fg: "#7dd3fc" },
   unclear: { bg: "rgba(251,191,36,0.14)", fg: "#fcd34d" }
 };
 
@@ -1314,6 +1316,27 @@ ${renderDock(ctx)}
         })
         .catch(function () { statusEl.textContent = "network error"; statusEl.className = "action-status mono err"; });
     });
+  }
+
+  /* ——— Cancel a queued follow-up ——— */
+  var cancelForms = document.querySelectorAll("[data-cancel-retarget]");
+  for (var ci = 0; ci < cancelForms.length; ci++) {
+    (function (form) {
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        if (!confirm("Cancel the follow-up queued for this lead? Their sequence keeps running either way.")) return;
+        var statusEl = form.querySelector(".action-status");
+        statusEl.textContent = "cancelling…";
+        fetch("/dashboard/api/retargets/" + encodeURIComponent(form.getAttribute("data-retarget")) + "/cancel", {
+          method: "POST"
+        })
+          .then(function (r) {
+            if (r.ok) { statusEl.textContent = "cancelled ✓"; statusEl.className = "action-status mono ok"; setTimeout(function () { location.reload(); }, 700); }
+            else return r.json().then(function (b) { statusEl.textContent = (b && b.error) || "failed"; statusEl.className = "action-status mono err"; });
+          })
+          .catch(function () { statusEl.textContent = "network error"; statusEl.className = "action-status mono err"; });
+      });
+    })(cancelForms[ci]);
   }
 
   /* ——— Pause toggle ——— */
