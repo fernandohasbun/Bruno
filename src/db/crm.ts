@@ -13,8 +13,29 @@ export interface CrmLeadPageInput {
   status?: number;
   interestStatus?: number;
   persona?: string;
-  view?: "all" | "replied" | "interested" | "in-sequence" | "finished" | "suppressed";
+  view?: CrmLeadView;
 }
+
+/**
+ * Roster views, in funnel order. "contacted" exists because "in-sequence" is not
+ * it: Instantly marks every imported lead status 1, so that view returned the
+ * whole import list — 499 rows on P2 Legal, of which 23 had actually been
+ * emailed. last_contact_at is only set once a send happens.
+ */
+export const CRM_LEAD_VIEWS = [
+  "all",
+  "contacted",
+  "no-reply",
+  "away",
+  "needs-read",
+  "replied",
+  "interested",
+  "in-sequence",
+  "finished",
+  "suppressed"
+] as const;
+
+export type CrmLeadView = (typeof CRM_LEAD_VIEWS)[number];
 
 export interface CrmLeadRow {
   provider_lead_id: string;
@@ -32,6 +53,11 @@ export interface CrmLeadRow {
   last_contact_at: string | null;
   custom_fields: Record<string, string>;
   synced_at: string;
+  /** Bruno's most recent read of this lead — null until they reply at all. */
+  bruno_intent: string | null;
+  bruno_return_date: Date | null;
+  bruno_reason: string | null;
+  bruno_at: string | null;
 }
 
 export interface CrmMessagePageInput {
@@ -261,27 +287,46 @@ export async function listCrmLeadsPage(input: CrmLeadPageInput = {}) {
   const search = input.search?.trim() || null;
   const result = await pool.query<CrmLeadRow & { total_count: string }>(
     `
-      SELECT *, count(*) OVER()::text AS total_count
-      FROM crm_leads
+      SELECT l.*,
+             bruno.intent          AS bruno_intent,
+             bruno.ooo_return_date AS bruno_return_date,
+             bruno.reason          AS bruno_reason,
+             bruno.created_at::text AS bruno_at,
+             count(*) OVER()::text AS total_count
+      FROM crm_leads l
+      -- Bruno's latest read travels with the lead, so the roster shows what he
+      -- concluded next to what the provider reports. Same join the lead dossier
+      -- already does in getLeadActivity; both tables key on lower(email).
+      LEFT JOIN LATERAL (
+        SELECT rc.intent, rc.ooo_return_date, rc.reason, rc.created_at
+        FROM reply_classifications rc
+        WHERE lower(rc.email) = lower(l.email)
+        ORDER BY rc.created_at DESC
+        LIMIT 1
+      ) bruno ON true
       WHERE ($1::text IS NULL OR
-        email ILIKE '%' || $1 || '%' OR
-        coalesce(first_name, '') ILIKE '%' || $1 || '%' OR
-        coalesce(last_name, '') ILIKE '%' || $1 || '%' OR
-        coalesce(company_name, '') ILIKE '%' || $1 || '%' OR
-        coalesce(job_title, '') ILIKE '%' || $1 || '%')
-        AND ($2::text IS NULL OR campaign_id = $2)
-        AND ($3::integer IS NULL OR status = $3)
-        AND ($4::integer IS NULL OR interest_status = $4)
-        AND ($5::text IS NULL OR custom_fields->>'persona' = $5)
+        l.email ILIKE '%' || $1 || '%' OR
+        coalesce(l.first_name, '') ILIKE '%' || $1 || '%' OR
+        coalesce(l.last_name, '') ILIKE '%' || $1 || '%' OR
+        coalesce(l.company_name, '') ILIKE '%' || $1 || '%' OR
+        coalesce(l.job_title, '') ILIKE '%' || $1 || '%')
+        AND ($2::text IS NULL OR l.campaign_id = $2)
+        AND ($3::integer IS NULL OR l.status = $3)
+        AND ($4::integer IS NULL OR l.interest_status = $4)
+        AND ($5::text IS NULL OR l.custom_fields->>'persona' = $5)
         AND (
           $6::text IS NULL OR $6 = 'all'
-          OR ($6 = 'replied' AND email_reply_count > 0)
-          OR ($6 = 'interested' AND interest_status >= 1)
-          OR ($6 = 'in-sequence' AND status IN (1, 2))
-          OR ($6 = 'finished' AND status = 3)
-          OR ($6 = 'suppressed' AND status < 0)
+          OR ($6 = 'contacted' AND l.last_contact_at IS NOT NULL)
+          OR ($6 = 'no-reply' AND l.last_contact_at IS NOT NULL AND l.email_reply_count = 0)
+          OR ($6 = 'away' AND bruno.intent = 'out_of_office')
+          OR ($6 = 'needs-read' AND bruno.intent = 'unclear')
+          OR ($6 = 'replied' AND l.email_reply_count > 0)
+          OR ($6 = 'interested' AND l.interest_status >= 1)
+          OR ($6 = 'in-sequence' AND l.status IN (1, 2))
+          OR ($6 = 'finished' AND l.status = 3)
+          OR ($6 = 'suppressed' AND l.status < 0)
         )
-      ORDER BY coalesce(last_contact_at, provider_created_at, synced_at) DESC, email ASC
+      ORDER BY coalesce(l.last_contact_at, l.provider_created_at, l.synced_at) DESC, l.email ASC
       LIMIT $7 OFFSET $8
     `,
     [
@@ -308,6 +353,10 @@ export async function getCrmSummary() {
     pool.query<{
       total: string;
       uncontacted: string;
+      contacted: string;
+      no_reply: string;
+      away: string;
+      needs_read: string;
       in_sequence: string;
       finished: string;
       suppressed: string;
@@ -316,16 +365,27 @@ export async function getCrmSummary() {
       meetings: string;
     }>(
       `
+        WITH latest AS (
+          SELECT DISTINCT ON (lower(email)) lower(email) AS email, intent
+          FROM reply_classifications
+          WHERE email IS NOT NULL
+          ORDER BY lower(email), created_at DESC
+        )
         SELECT
           count(*)::text AS total,
-          count(*) FILTER (WHERE last_contact_at IS NULL)::text AS uncontacted,
-          count(*) FILTER (WHERE status IN (1, 2))::text AS in_sequence,
-          count(*) FILTER (WHERE status = 3)::text AS finished,
-          count(*) FILTER (WHERE status < 0)::text AS suppressed,
-          count(*) FILTER (WHERE email_reply_count > 0)::text AS replied,
-          count(*) FILTER (WHERE interest_status >= 1)::text AS interested,
-          count(*) FILTER (WHERE interest_status IN (2, 3, 4))::text AS meetings
-        FROM crm_leads
+          count(*) FILTER (WHERE l.last_contact_at IS NULL)::text AS uncontacted,
+          count(*) FILTER (WHERE l.last_contact_at IS NOT NULL)::text AS contacted,
+          count(*) FILTER (WHERE l.last_contact_at IS NOT NULL AND l.email_reply_count = 0)::text AS no_reply,
+          count(*) FILTER (WHERE b.intent = 'out_of_office')::text AS away,
+          count(*) FILTER (WHERE b.intent = 'unclear')::text AS needs_read,
+          count(*) FILTER (WHERE l.status IN (1, 2))::text AS in_sequence,
+          count(*) FILTER (WHERE l.status = 3)::text AS finished,
+          count(*) FILTER (WHERE l.status < 0)::text AS suppressed,
+          count(*) FILTER (WHERE l.email_reply_count > 0)::text AS replied,
+          count(*) FILTER (WHERE l.interest_status >= 1)::text AS interested,
+          count(*) FILTER (WHERE l.interest_status IN (2, 3, 4))::text AS meetings
+        FROM crm_leads l
+        LEFT JOIN latest b ON b.email = lower(l.email)
       `
     ),
     pool.query<{ campaign_id: string | null; total: string; contacted: string; replied: string }>(
@@ -347,12 +407,17 @@ export async function getCrmSummary() {
     )
   ]);
   const row = totals.rows[0] ?? {
-    total: "0", uncontacted: "0", in_sequence: "0", finished: "0",
+    total: "0", uncontacted: "0", contacted: "0", no_reply: "0", away: "0",
+    needs_read: "0", in_sequence: "0", finished: "0",
     suppressed: "0", replied: "0", interested: "0", meetings: "0"
   };
   return {
     total: Number(row.total),
     uncontacted: Number(row.uncontacted),
+    contacted: Number(row.contacted),
+    noReply: Number(row.no_reply),
+    away: Number(row.away),
+    needsRead: Number(row.needs_read),
     inSequence: Number(row.in_sequence),
     finished: Number(row.finished),
     suppressed: Number(row.suppressed),

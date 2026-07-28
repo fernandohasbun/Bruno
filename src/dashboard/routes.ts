@@ -50,7 +50,9 @@ import {
   listCrmMessagesPage,
   listRecentAgentActions,
   listSyncCheckpoints,
-  recordAgentAction
+  recordAgentAction,
+  CRM_LEAD_VIEWS,
+  type CrmLeadView
 } from "../db/crm.js";
 import {
   createLesson,
@@ -970,10 +972,12 @@ export async function registerDashboard(app: FastifyInstance) {
     const query = request.query as Record<string, unknown>;
     const page = Math.max(1, Number.parseInt(typeof query.page === "string" ? query.page : "1", 10) || 1);
     const search = typeof query.q === "string" ? query.q.trim().slice(0, 200) : undefined;
-    const allowedViews = ["all", "replied", "interested", "in-sequence", "finished", "suppressed"] as const;
-    const view = allowedViews.includes(query.view as (typeof allowedViews)[number])
-      ? (query.view as (typeof allowedViews)[number])
-      : "all";
+    // Defaults to the people the campaign has actually emailed. "all" is one tab
+    // away and shows its count, because the full roster is mostly an import list:
+    // on P2 Legal, 499 leads against 23 contacted.
+    const view = CRM_LEAD_VIEWS.includes(query.view as CrmLeadView)
+      ? (query.view as CrmLeadView)
+      : "contacted";
     const [shell, result, summary, checkpoints] = await Promise.all([
       loadShellContext("leads", "Leads", true),
       listCrmLeadsPage({ page, pageSize: 50, search, view }),
@@ -1000,7 +1004,12 @@ export async function registerDashboard(app: FastifyInstance) {
         clicks: lead.email_click_count,
         replies: lead.email_reply_count,
         lastContactAt: lead.last_contact_at ?? undefined,
-        tags: [...tags, lead.custom_fields.persona, lead.custom_fields.targetRole].filter(Boolean).join(" ").toLowerCase()
+        brunoIntent: lead.bruno_intent ?? undefined,
+        brunoReturnDate: lead.bruno_return_date ? lead.bruno_return_date.toISOString().slice(0, 10) : undefined,
+        tags: [...tags, lead.bruno_intent, lead.custom_fields.persona, lead.custom_fields.targetRole]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
       };
     });
     return reply.type("text/html").send(
