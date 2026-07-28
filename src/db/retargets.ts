@@ -98,6 +98,53 @@ export async function claimDueRetargets(limit = 25) {
   return result.rows;
 }
 
+export interface AwayLeadRow {
+  email: string;
+  company_name: string | null;
+  reason: string;
+  created_at: string;
+  ooo_return_date: Date | null;
+  ooo_alternate_contact: string | null;
+  raw_thread: string | null;
+  retarget_id: string | null;
+  retarget_run_after: string | null;
+}
+
+/**
+ * Leads whose most recent reply was an autoresponder, with any follow-up still
+ * queued for them. Backs the Inbox "Away" section: without it an out_of_office
+ * classification is invisible, and a scheduled retarget has no screen at all.
+ */
+export async function listAwayLeads(limit = 40): Promise<AwayLeadRow[]> {
+  const result = await pool.query<AwayLeadRow>(
+    `
+      SELECT DISTINCT ON (lower(rc.email))
+        rc.email,
+        rc.company_name,
+        rc.reason,
+        rc.created_at::text,
+        rc.ooo_return_date,
+        rc.ooo_alternate_contact,
+        rc.raw_thread,
+        r.id AS retarget_id,
+        r.run_after::text AS retarget_run_after
+      FROM reply_classifications rc
+      LEFT JOIN scheduled_retargets r
+        ON lower(r.email) = lower(rc.email) AND r.status = 'scheduled'
+      WHERE rc.intent = 'out_of_office' AND rc.email IS NOT NULL
+      ORDER BY lower(rc.email), rc.created_at DESC
+      LIMIT $1
+    `,
+    [limit]
+  );
+  // Soonest return first; the dateless ones sit at the bottom.
+  return result.rows.sort((a, b) => {
+    const aDate = a.ooo_return_date ? a.ooo_return_date.getTime() : Number.POSITIVE_INFINITY;
+    const bDate = b.ooo_return_date ? b.ooo_return_date.getTime() : Number.POSITIVE_INFINITY;
+    return aDate - bDate || a.email.localeCompare(b.email);
+  });
+}
+
 export async function cancelRetargetById(id: string, reason: string) {
   await pool.query(
     "UPDATE scheduled_retargets SET status = 'cancelled', cancelled_reason = $2, updated_at = now() WHERE id = $1",

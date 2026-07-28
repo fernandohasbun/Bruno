@@ -784,13 +784,80 @@ function handledDescription(intent: string) {
   }
 }
 
+export interface AwayModel {
+  companyName?: string;
+  email: string;
+  returnDate?: string;
+  alternateContact?: string;
+  prospectText?: string;
+  createdAt: string;
+  retargetId?: string;
+  retargetAt?: string;
+}
+
+/** "back Thursday" reads better than a bare date when the return is imminent. */
+function returnLabel(returnDate: string | undefined, now: Date) {
+  if (!returnDate) return "no date given";
+  const then = new Date(`${returnDate}T00:00:00.000Z`);
+  if (Number.isNaN(then.getTime())) return "no date given";
+  const today = new Date(`${now.toISOString().slice(0, 10)}T00:00:00.000Z`);
+  const days = Math.round((then.getTime() - today.getTime()) / 86400000);
+  const weekday = then.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
+  if (days < 0) return `was back ${weekday}`;
+  if (days === 0) return "back today";
+  if (days === 1) return "back tomorrow";
+  if (days <= 6) return `back ${weekday}`;
+  return `back ${then.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
+}
+
+function renderAwaySection(away: AwayModel[], now: Date) {
+  if (away.length === 0) return "";
+  const scheduled = away.filter((row) => row.retargetId).length;
+  return `
+    <h2>Away <span class="count mono">${away.length}</span></h2>
+    <p class="muted" style="margin-top:-4px">Auto-replies — nobody made a decision here, so their sequence keeps running. ${
+      scheduled > 0
+        ? `${scheduled} follow-up${scheduled === 1 ? "" : "s"} queued for when they're back; the draft lands in "Waiting on you" that morning.`
+        : `None have a return date, so nothing is queued.`
+    }</p>
+    ${away
+      .map(
+        (row) => `
+        <div class="feed-row">
+          <div class="feed-top">
+            <strong>${escapeHtml(whoLabel(row.companyName, row.email))}</strong>
+            <span class="badge" style="background:rgba(56,189,248,0.14);color:#7dd3fc">${escapeHtml(returnLabel(row.returnDate, now))}</span>
+            ${
+              row.retargetId
+                ? `<span class="mono muted">follow-up queued</span>`
+                : `<span class="mono muted">no follow-up</span>`
+            }
+            <span class="mono muted">${relativeTime(row.createdAt, now)}</span>
+          </div>
+          <div class="feed-reason muted">${escapeHtml(row.email)}${
+            row.alternateContact ? ` · while away: ${escapeHtml(row.alternateContact)}` : ""
+          }</div>
+          ${
+            row.retargetId
+              ? `<div class="feed-reason"><form class="interest-form" data-cancel-retarget data-retarget="${escapeHtml(row.retargetId)}">
+                   <button class="btn btn-plain" type="submit">Cancel follow-up</button>
+                   <span class="action-status mono" aria-live="polite"></span>
+                 </form></div>`
+              : ""
+          }
+        </div>`
+      )
+      .join("\n")}`;
+}
+
 export function renderInboxPage(
   drafts: DraftCardModel[],
   needsRead: ReplyFeedModel[],
   handled: ReplyFeedModel[],
   activity: ActivityModel[],
   now: Date,
-  pulse?: PulseView
+  pulse?: PulseView,
+  away: AwayModel[] = []
 ) {
   const cards = drafts.map((draft) => renderDraftCard(draft, now)).join("\n");
   const empty = `
@@ -858,6 +925,7 @@ export function renderInboxPage(
     <h2>Waiting on you <span class="count mono" id="pending-count">${drafts.length}</span></h2>
     ${drafts.length > 0 ? cards : empty}
     ${needsReadHtml}
+    ${renderAwaySection(away, now)}
     <h2>Handled for you · 7d</h2>
     ${handledHtml}
     <h2>Recent actions</h2>
