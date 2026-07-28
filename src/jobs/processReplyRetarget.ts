@@ -79,6 +79,9 @@ export async function processReplyRetargetJob(job: QueueJob) {
     // The retarget needs its own classification row to hang the draft off, so it
     // renders in the dashboard queue exactly like any other pending draft.
     const replyClassificationId = await saveReplyClassification({
+      // Inherit the autoresponder's event so the dashboard can resolve the
+      // Instantly message reference and Approve actually sends.
+      eventId: row.original_event_id ?? undefined,
       email: row.email,
       companyName: row.company_name ?? undefined,
       classification: {

@@ -68,19 +68,30 @@ interface RetargetRow {
   return_date: Date;
   original_thread: string | null;
   alternate_contact: string | null;
+  original_event_id: string | null;
 }
 
-/** Retargets whose return date has arrived and that still need a draft. */
+/**
+ * Retargets whose return date has arrived and that still need a draft.
+ *
+ * original_event_id carries the event behind the autoresponder we are answering.
+ * The dashboard resolves a draft's Instantly message reference through
+ * reply_classifications.event_id, so a retarget drafted without it lands in the
+ * approval queue un-sendable — reusing the original event threads the
+ * re-approach onto the same conversation and keeps Approve working.
+ */
 export async function claimDueRetargets(limit = 25) {
   const result = await pool.query<RetargetRow>(
     `
-      SELECT id, email, campaign_id, provider_lead_id, company_name,
-             return_date, original_thread, alternate_contact
-      FROM scheduled_retargets
-      WHERE status = 'scheduled' AND run_after <= now()
-      ORDER BY run_after
+      SELECT r.id, r.email, r.campaign_id, r.provider_lead_id, r.company_name,
+             r.return_date, r.original_thread, r.alternate_contact,
+             rc.event_id AS original_event_id
+      FROM scheduled_retargets r
+      LEFT JOIN reply_classifications rc ON rc.id = r.reply_classification_id
+      WHERE r.status = 'scheduled' AND r.run_after <= now()
+      ORDER BY r.run_after
       LIMIT $1
-      FOR UPDATE SKIP LOCKED
+      FOR UPDATE OF r SKIP LOCKED
     `,
     [limit]
   );
