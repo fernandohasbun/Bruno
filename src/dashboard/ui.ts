@@ -61,7 +61,9 @@ const INTENT_STYLES: Record<string, { bg: string; fg: string }> = {
 
 export function intentBadge(intent: string) {
   const style = INTENT_STYLES[intent] ?? INTENT_STYLES.unclear;
-  const label = intent.replace("_", " ");
+  // replaceAll, not replace: a string pattern swaps only the first match, so
+  // out_of_office rendered as "out of_office" once an intent had two underscores.
+  const label = intent.replaceAll("_", " ");
   return `<span class="badge" style="background:${style.bg};color:${style.fg}">${escapeHtml(label)}</span>`;
 }
 

@@ -9,6 +9,7 @@ import {
 import { CRM_LEAD_VIEWS } from "../src/db/crm.js";
 import { retargetRunAfter } from "../src/db/retargets.js";
 import { normalizeInstantlyEvent } from "../src/webhooks/normalizeInstantlyEvent.js";
+import { intentBadge } from "../src/dashboard/ui.js";
 import { inboxSection, isReplyIntent } from "../src/dashboard/routes.js";
 import type { ReplyClassification, ReplyIntent } from "../src/types/domain.js";
 
@@ -126,6 +127,14 @@ test("non-OOO intents never carry absence detail", () => {
 
 test("the retarget lands mid-morning on the return date, not at midnight", () => {
   assert.equal(retargetRunAfter("2026-07-30").toISOString(), "2026-07-30T14:00:00.000Z");
+});
+
+test("intent badges spell out every underscore", () => {
+  // out_of_office rendered as "out of_office" because a string pattern in
+  // String.replace swaps only the first match. not_now hid it — one underscore.
+  assert.match(intentBadge("out_of_office"), />out of office</);
+  assert.match(intentBadge("not_now"), />not now</);
+  assert.match(intentBadge("positive"), />positive</);
 });
 
 test("the roster separates contacted from merely imported", () => {
