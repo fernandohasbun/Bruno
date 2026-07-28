@@ -10,6 +10,7 @@ import { CRM_LEAD_VIEWS } from "../src/db/crm.js";
 import { retargetRunAfter } from "../src/db/retargets.js";
 import { normalizeInstantlyEvent } from "../src/webhooks/normalizeInstantlyEvent.js";
 import { intentBadge } from "../src/dashboard/ui.js";
+import { renderLeadsPage } from "../src/dashboard/pages.js";
 import { inboxSection, isReplyIntent } from "../src/dashboard/routes.js";
 import type { ReplyClassification, ReplyIntent } from "../src/types/domain.js";
 
@@ -127,6 +128,28 @@ test("non-OOO intents never carry absence detail", () => {
 
 test("the retarget lands mid-morning on the return date, not at midnight", () => {
   assert.equal(retargetRunAfter("2026-07-30").toISOString(), "2026-07-30T14:00:00.000Z");
+});
+
+test("a return label always carries its calendar date", () => {
+  // "back Monday" alone makes the reader work out which Monday, which is how a
+  // scheduled follow-up gets skimmed past in a table of eight near-identical rows.
+  const now = new Date("2026-07-28T18:00:00.000Z"); // Tuesday
+  const label = (date?: string) =>
+    renderLeadsPage(
+      {
+        rows: [{ email: "a@b.com", opens: 0, clicks: 0, replies: 1, tags: "", brunoIntent: "out_of_office", brunoReturnDate: date }],
+        total: 1, page: 1, pageSize: 50, view: "away",
+        summary: { total: 1, uncontacted: 0, contacted: 1, noReply: 0, away: 1, needsRead: 0, inSequence: 1, replied: 1, interested: 0, finished: 0, suppressed: 0 }
+      },
+      now
+    );
+
+  assert.match(label("2026-07-30"), /back Thu · 7\/30/);
+  assert.match(label("2026-08-03"), /back Mon · 8\/3/);
+  assert.match(label("2026-07-29"), /back tomorrow · 7\/29/);
+  // A date in another year must say so, since a return can cross December.
+  assert.match(label("2027-01-04"), /back Mon · 1\/4\/27/);
+  assert.match(label(undefined), /no date given/);
 });
 
 test("intent badges spell out every underscore", () => {

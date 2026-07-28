@@ -840,12 +840,21 @@ function returnLabel(returnDate: string | undefined, now: Date) {
   if (Number.isNaN(then.getTime())) return "no date given";
   const today = new Date(`${now.toISOString().slice(0, 10)}T00:00:00.000Z`);
   const days = Math.round((then.getTime() - today.getTime()) / 86400000);
-  const weekday = then.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" });
-  if (days < 0) return `was back ${weekday}`;
-  if (days === 0) return "back today";
-  if (days === 1) return "back tomorrow";
-  if (days <= 6) return `back ${weekday}`;
-  return `back ${then.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
+  const weekday = then.toLocaleDateString("en-US", { weekday: "short", timeZone: "UTC" });
+
+  // Always carry the calendar date. A bare "back Monday" makes the reader work
+  // out which Monday, which is exactly how a row gets skimmed past in a table.
+  // The year only appears when it differs — a return date can cross December.
+  const sameYear = then.getUTCFullYear() === today.getUTCFullYear();
+  const numeric = `${then.getUTCMonth() + 1}/${then.getUTCDate()}${
+    sameYear ? "" : `/${String(then.getUTCFullYear()).slice(2)}`
+  }`;
+
+  if (days < 0) return `was back ${numeric}`;
+  if (days === 0) return `back today · ${numeric}`;
+  if (days === 1) return `back tomorrow · ${numeric}`;
+  if (days <= 6) return `back ${weekday} · ${numeric}`;
+  return `back ${weekday} · ${numeric}`;
 }
 
 function renderAwaySection(away: AwayModel[], now: Date) {
