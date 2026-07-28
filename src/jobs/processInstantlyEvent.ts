@@ -4,6 +4,7 @@ import { activateAlertOnce, clearAlertOnce, isAgentPaused } from "../db/config.j
 import { markEventProcessed } from "../db/events.js";
 import { saveDraft, saveReplyClassification } from "../db/replyRecords.js";
 import { saveSuppression } from "../db/suppressions.js";
+import { cancelPendingRetargets, scheduleRetarget } from "../db/retargets.js";
 import { stopLeadSequence, suppressLead } from "../integrations/instantly.js";
 import { notifyAlert, notifyHotReply } from "../integrations/notify.js";
 import { enqueueJob, type QueueJob } from "../queue/queue.js";
@@ -51,7 +52,9 @@ export async function processInstantlyEventJob(job: QueueJob) {
   const classification = await classifyReply({
     companyName: event.companyName,
     email: event.email,
-    threadText
+    subject: event.subject,
+    threadText,
+    providerAutoReplyHint: autoReplyHint(event)
   });
 
   const replyClassificationId = await saveReplyClassification({
@@ -61,6 +64,37 @@ export async function processInstantlyEventJob(job: QueueJob) {
     classification,
     rawThread: threadText
   });
+
+  // An autoresponder is not a human decision: the sequence keeps running, nobody
+  // gets paged, and no reply is drafted today. If it named a return date we hold
+  // the lead and re-approach on the day they are back.
+  if (classification.intent === "out_of_office") {
+    const returnDate = classification.outOfOffice?.returnDate;
+    if (returnDate && event.email) {
+      await scheduleRetarget({
+        replyClassificationId,
+        email: event.email,
+        campaignId: event.campaignId,
+        providerLeadId: event.leadId,
+        companyName: event.companyName,
+        returnDate,
+        originalThread: threadText,
+        alternateContact: classification.outOfOffice?.alternateContact
+      });
+    }
+    await markEventProcessed(eventId);
+    return;
+  }
+
+  // Any genuine human reply supersedes a pending retarget — re-approaching a live
+  // thread weeks later would read as if we never saw their response.
+  if (event.email) {
+    await cancelPendingRetargets({
+      email: event.email,
+      campaignId: event.campaignId,
+      reason: `superseded by ${classification.intent} reply`
+    });
+  }
 
   const shouldDraft = ["positive", "question", "objection"].includes(classification.intent);
   const draft = shouldDraft
@@ -104,6 +138,18 @@ export async function processInstantlyEventJob(job: QueueJob) {
   }
 
   await markEventProcessed(eventId);
+}
+
+/**
+ * Instantly's per-email auto-reply flag, when it is set. Treated as a hint only:
+ * observed autoresponders carry is_auto_reply=false on the /emails endpoint even
+ * when campaign analytics counts them as automatic replies.
+ */
+function autoReplyHint(event: InstantlyEvent) {
+  const raw = event.raw as Record<string, unknown> | undefined;
+  const data = (raw?.data ?? raw) as Record<string, unknown> | undefined;
+  const flag = data?.is_auto_reply;
+  return flag === true || flag === 1;
 }
 
 function isReply(event: InstantlyEvent) {

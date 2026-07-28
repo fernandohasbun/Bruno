@@ -391,17 +391,61 @@ export interface CrmRow {
   tags: string;
 }
 
-export function renderLeadsPage(rows: CrmRow[], now: Date, capped: boolean) {
-  const tabs = ["all", "replied", "interested", "in sequence", "finished", "suppressed"];
+export interface LeadsPageModel {
+  rows: CrmRow[];
+  total: number;
+  page: number;
+  pageSize: number;
+  search?: string;
+  view: "all" | "replied" | "interested" | "in-sequence" | "finished" | "suppressed";
+  summary: {
+    total: number;
+    uncontacted: number;
+    inSequence: number;
+    replied: number;
+    interested: number;
+    suppressed: number;
+  };
+  syncLabel?: string;
+}
+
+function pageHref(path: string, params: Record<string, string | number | undefined>) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "" && value !== "all") query.set(key, String(value));
+  }
+  const suffix = query.toString();
+  return `${path}${suffix ? `?${suffix}` : ""}`;
+}
+
+function renderPager(path: string, page: number, pageSize: number, total: number, params: Record<string, string | undefined>) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (pages <= 1) return "";
+  return `<nav class="pager mono" aria-label="Pagination">
+    ${page > 1 ? `<a class="btn btn-plain" href="${escapeHtml(pageHref(path, { ...params, page: page - 1 }))}">← Previous</a>` : ""}
+    <span class="muted">page ${page} of ${pages}</span>
+    ${page < pages ? `<a class="btn btn-plain" href="${escapeHtml(pageHref(path, { ...params, page: page + 1 }))}">Next →</a>` : ""}
+  </nav>`;
+}
+
+export function renderLeadsPage(m: LeadsPageModel, now: Date) {
+  const tabs: Array<{ value: LeadsPageModel["view"]; label: string }> = [
+    { value: "all", label: "all" },
+    { value: "replied", label: "replied" },
+    { value: "interested", label: "interested" },
+    { value: "in-sequence", label: "in sequence" },
+    { value: "finished", label: "finished" },
+    { value: "suppressed", label: "suppressed" }
+  ];
   const table =
-    rows.length === 0
-      ? `<div class="empty"><p>No leads in the campaign yet — they'll appear here as soon as the Apollo import lands in Instantly.</p></div>`
+    m.rows.length === 0
+      ? `<div class="empty"><p>No leads match this view yet. Bruno's synchronized CRM will fill automatically as Instantly is scanned.</p></div>`
       : `
       <div class="table-scroll">
         <table id="crm-table">
           <thead><tr><th>Lead</th><th>Persona</th><th>Pipeline</th><th>Sequence</th><th class="num">Opens</th><th class="num">Clicks</th><th class="num">Replies</th><th>Last contact</th></tr></thead>
           <tbody>
-            ${rows
+            ${m.rows
               .map(
                 (row) => `
                 <tr data-tags="${escapeHtml(row.tags)}" data-text="${escapeHtml(`${row.name ?? ""} ${row.company ?? ""} ${row.email} ${row.persona ?? ""} ${row.targetRole ?? ""}`.toLowerCase())}">
@@ -422,12 +466,186 @@ export function renderLeadsPage(rows: CrmRow[], now: Date, capped: boolean) {
 
   return `
   <main class="reveal">
-    <div class="crm-bar">
-      ${tabs.map((tab, i) => `<button class="crm-tab${i === 0 ? " sel" : ""}" data-crm-filter="${tab}">${tab}</button>`).join("")}
-      <input class="crm-search" id="crm-search" type="text" placeholder="filter by name, company, email…" />
-      <span class="mono muted">${rows.length}${capped ? "+" : ""} leads</span>
-    </div>
+    <section class="crm-summary">
+      <div class="crm-stat"><strong>${m.summary.total.toLocaleString("en-US")}</strong><span>all synchronized</span></div>
+      <div class="crm-stat"><strong>${m.summary.uncontacted.toLocaleString("en-US")}</strong><span>uncontacted</span></div>
+      <div class="crm-stat"><strong>${m.summary.replied.toLocaleString("en-US")}</strong><span>replied</span></div>
+      <div class="crm-stat"><strong>${m.summary.interested.toLocaleString("en-US")}</strong><span>interested</span></div>
+    </section>
+    <form class="crm-bar" action="/dashboard/leads" method="get">
+      ${tabs.map((tab) => `<a class="crm-tab${m.view === tab.value ? " sel" : ""}" style="text-decoration:none" href="${escapeHtml(pageHref("/dashboard/leads", { view: tab.value, q: m.search }))}">${tab.label}</a>`).join("")}
+      <input class="crm-search" name="q" type="search" value="${escapeHtml(m.search ?? "")}" placeholder="search the complete CRM…" />
+      ${m.view !== "all" ? `<input type="hidden" name="view" value="${escapeHtml(m.view)}" />` : ""}
+      <button class="btn btn-plain" type="submit">Search</button>
+      <span class="mono muted">${m.total.toLocaleString("en-US")} match${m.total === 1 ? "" : "es"}${m.syncLabel ? ` · ${escapeHtml(m.syncLabel)}` : ""}</span>
+    </form>
     ${table}
+    ${renderPager("/dashboard/leads", m.page, m.pageSize, m.total, { view: m.view, q: m.search })}
+  </main>`;
+}
+
+// ————— Account-wide message ledger —————
+
+export interface ActivityMessage {
+  id: string;
+  direction: "sent" | "received" | "manual";
+  at?: string;
+  leadEmail?: string;
+  campaignName?: string;
+  sender?: string;
+  step?: string;
+  variant?: string;
+  subject?: string;
+  preview?: string;
+  bodyText?: string;
+}
+
+export interface ActivityPageModel {
+  messages: ActivityMessage[];
+  total: number;
+  page: number;
+  pageSize: number;
+  search?: string;
+  direction?: "sent" | "received" | "manual";
+  sender?: string;
+  from?: string;
+  to?: string;
+  summary: { total: number; sent: number; received: number; manual: number; leads: number; senders: string[] };
+  syncLabel?: string;
+}
+
+export function renderActivityPage(m: ActivityPageModel, now: Date) {
+  const rows =
+    m.messages.length === 0
+      ? `<div class="empty"><p>No messages match these filters. The ledger fills automatically from Instantly.</p></div>`
+      : `<div class="table-scroll">
+          <table>
+            <thead><tr><th>Direction</th><th>Lead</th><th>Subject / exact content</th><th>Sender</th><th>Sequence</th><th>When</th></tr></thead>
+            <tbody>
+              ${m.messages
+                .map((message, index) => {
+                  const key = `${index}-${message.id}`;
+                  return `<tr class="ledger-row" data-ledger-row="${escapeHtml(key)}">
+                    <td><span class="direction direction-${message.direction}">${message.direction}</span></td>
+                    <td>${message.leadEmail ? `<a class="lead-link mono" href="/dashboard/lead?email=${encodeURIComponent(message.leadEmail)}">${escapeHtml(message.leadEmail)}</a>` : `<span class="muted">unknown</span>`}</td>
+                    <td>
+                      <strong>${escapeHtml(message.subject || "(no subject)")}</strong>
+                      <div class="ledger-preview">${escapeHtml((message.preview || message.bodyText || "").slice(0, 180))}</div>
+                    </td>
+                    <td class="mono">${escapeHtml(message.sender ?? "—")}</td>
+                    <td><span class="mono">${message.step ? `step ${escapeHtml(message.step)}` : "—"}${message.variant ? ` · ${escapeHtml(message.variant)}` : ""}</span>${message.campaignName ? `<div class="muted">${escapeHtml(message.campaignName)}</div>` : ""}</td>
+                    <td class="mono">${message.at ? relativeTime(message.at, now) : "—"}</td>
+                  </tr>
+                  <tr class="ledger-detail" data-ledger-detail="${escapeHtml(key)}" hidden>
+                    <td colspan="6">
+                      <div class="ledger-message">${escapeHtml(message.bodyText || message.preview || "(message body unavailable)")}</div>
+                    </td>
+                  </tr>`;
+                })
+                .join("\n")}
+            </tbody>
+          </table>
+        </div>`;
+
+  return `<main class="reveal">
+    <section class="crm-summary">
+      <div class="crm-stat"><strong>${m.summary.total.toLocaleString("en-US")}</strong><span>all messages</span></div>
+      <div class="crm-stat"><strong>${m.summary.sent.toLocaleString("en-US")}</strong><span>campaign sent</span></div>
+      <div class="crm-stat"><strong>${m.summary.received.toLocaleString("en-US")}</strong><span>received</span></div>
+      <div class="crm-stat"><strong>${m.summary.leads.toLocaleString("en-US")}</strong><span>lead threads</span></div>
+    </section>
+    <form class="crm-bar" action="/dashboard/activity" method="get">
+      <input class="crm-search" name="q" type="search" value="${escapeHtml(m.search ?? "")}" placeholder="search email, subject, or exact message text…" />
+      <select class="crm-select" name="direction">
+        <option value="">all directions</option>
+        ${(["sent", "received", "manual"] as const).map((value) => `<option value="${value}"${m.direction === value ? " selected" : ""}>${value}</option>`).join("")}
+      </select>
+      <select class="crm-select" name="sender">
+        <option value="">all senders</option>
+        ${m.summary.senders.map((sender) => `<option value="${escapeHtml(sender)}"${m.sender === sender ? " selected" : ""}>${escapeHtml(sender)}</option>`).join("")}
+      </select>
+      <input class="crm-date" type="date" name="from" value="${escapeHtml(m.from ?? "")}" title="From date" />
+      <input class="crm-date" type="date" name="to" value="${escapeHtml(m.to ?? "")}" title="To date" />
+      <button class="btn btn-plain" type="submit">Filter</button>
+      <span class="mono muted">${m.total.toLocaleString("en-US")} match${m.total === 1 ? "" : "es"}${m.syncLabel ? ` · ${escapeHtml(m.syncLabel)}` : ""}</span>
+    </form>
+    ${rows}
+    ${renderPager("/dashboard/activity", m.page, m.pageSize, m.total, {
+      q: m.search,
+      direction: m.direction,
+      sender: m.sender,
+      from: m.from,
+      to: m.to
+    })}
+  </main>`;
+}
+
+// ————— Human-approved learning —————
+
+export interface LessonView {
+  id: string;
+  kind: string;
+  lesson: string;
+  evidence: unknown;
+  confidence: number;
+  status: "proposed" | "active" | "rejected" | "retired";
+  sourceCount: number;
+  proposedBy: string;
+  approvedBy?: string;
+  createdAt: string;
+}
+
+export function renderLearningPage(lessons: LessonView[], now: Date) {
+  const proposed = lessons.filter((lesson) => lesson.status === "proposed").length;
+  const active = lessons.filter((lesson) => lesson.status === "active").length;
+  const cards =
+    lessons.length === 0
+      ? `<div class="empty"><p>No lessons yet. Bruno reviews owner edits weekly and will propose recurring patterns here.</p></div>`
+      : `<div class="lesson-grid">${lessons
+          .map((lesson) => {
+            const evidence =
+              Array.isArray(lesson.evidence) || (lesson.evidence && typeof lesson.evidence === "object")
+                ? JSON.stringify(lesson.evidence, null, 2)
+                : String(lesson.evidence ?? "");
+            const actions =
+              lesson.status === "proposed"
+                ? `<button class="btn btn-approve" data-lesson-id="${lesson.id}" data-lesson-status="active">Activate</button>
+                   <button class="btn btn-reject" data-lesson-id="${lesson.id}" data-lesson-status="rejected">Reject</button>`
+                : lesson.status === "active"
+                  ? `<button class="btn btn-reject" data-lesson-id="${lesson.id}" data-lesson-status="retired">Retire</button>`
+                  : `<button class="btn btn-plain" data-lesson-id="${lesson.id}" data-lesson-status="active">Reactivate</button>`;
+            return `<article class="lesson lesson-${lesson.status}">
+              <div class="lesson-head">
+                <span class="badge">${escapeHtml(lesson.kind)}</span>
+                <span class="mono">${escapeHtml(lesson.status)}</span>
+                <span class="confidence mono">${Math.round(lesson.confidence * 100)}% confidence</span>
+              </div>
+              <div class="lesson-text">${escapeHtml(lesson.lesson)}</div>
+              <div class="lesson-evidence">${escapeHtml(evidence || "No structured evidence attached.")}</div>
+              <div class="mono muted">${lesson.sourceCount} supporting owner edit${lesson.sourceCount === 1 ? "" : "s"} · proposed by ${escapeHtml(lesson.proposedBy)} · ${relativeTime(lesson.createdAt, now)}</div>
+              <div class="lesson-actions">${actions}${lesson.approvedBy ? `<span class="mono muted">approved by ${escapeHtml(lesson.approvedBy)}</span>` : ""}</div>
+            </article>`;
+          })
+          .join("\n")}</div>`;
+
+  return `<main class="reveal">
+    <div class="status-hero ${proposed > 0 ? "status-bad" : "status-ok"}">
+      <div class="status-mark">${proposed > 0 ? proposed : "✓"}</div>
+      <div>
+        <strong>${proposed > 0 ? `${proposed} lesson${proposed === 1 ? "" : "s"} waiting for owner review.` : "Bruno only learns approved lessons."}</strong><br/>
+        <span class="muted">${active} active. Draft edits are evidence, not automatic permission: proposed rules do nothing until you activate them.</span>
+      </div>
+    </div>
+    <h2>Add owner guidance</h2>
+    <form class="control-card crm-bar" data-lesson-form>
+      <select class="crm-select" name="kind">
+        ${["preference", "copy", "objection", "targeting", "process"].map((kind) => `<option value="${kind}">${kind}</option>`).join("")}
+      </select>
+      <input class="crm-search" name="lesson" maxlength="1000" placeholder="e.g. Keep objection replies under 90 words and end with one question." required />
+      <button class="btn btn-plain" type="submit">Propose lesson</button>
+    </form>
+    <h2>Learning memory <span class="count mono">${lessons.length}</span></h2>
+    ${cards}
   </main>`;
 }
 
@@ -658,6 +876,13 @@ export interface CampaignModel {
   daily: Array<{ date: string; contacted: number; sends: number; replies: number; bounces: number }>;
   pulse?: PulseView;
   profitability: Array<{ persona: string; currency: string; outcomes: number; revenue: number; direct_cost: number; gross_profit: number }>;
+  controls: Array<{
+    id: string;
+    name: string;
+    status: string;
+    dailyLimit?: number;
+    schedule?: string;
+  }>;
 }
 
 function formatPercent(numerator: number, denominator: number) {
@@ -810,12 +1035,43 @@ export function renderCampaignPage(m: CampaignModel) {
       </div>
     </section>`;
 
+  const controls =
+    m.controls.length === 0
+      ? `<p class="muted">Managed campaign controls are unavailable while Instantly is unreachable.</p>`
+      : `<div class="control-list">${m.controls
+          .map((campaign) => {
+            const isLive = campaign.status === "active" || campaign.status === "running";
+            return `<div class="control-row">
+              <div class="control-name">
+                <strong>${escapeHtml(campaign.name)}</strong>
+                <span class="mono">${escapeHtml(campaign.id)}</span>
+              </div>
+              <span class="badge" style="${isLive ? "background:var(--ok-soft);color:var(--ok)" : "background:var(--warn-soft);color:var(--warn)"}">${escapeHtml(campaign.status)}</span>
+              <div>
+                <input class="limit-input" data-limit-input="${escapeHtml(campaign.id)}" type="number" min="1" max="500" value="${campaign.dailyLimit ?? ""}" aria-label="Daily limit for ${escapeHtml(campaign.name)}" />
+                <button class="btn btn-plain" data-campaign-action="daily_limit" data-campaign-id="${escapeHtml(campaign.id)}" data-campaign-name="${escapeHtml(campaign.name)}">Set limit</button>
+              </div>
+              <div class="control-meta">
+                ${isLive
+                  ? `<button class="btn btn-reject" data-campaign-action="pause" data-campaign-id="${escapeHtml(campaign.id)}" data-campaign-name="${escapeHtml(campaign.name)}">Pause</button>`
+                  : `<button class="btn btn-approve" data-campaign-action="resume" data-campaign-id="${escapeHtml(campaign.id)}" data-campaign-name="${escapeHtml(campaign.name)}">Resume</button>`}
+                <span class="mono muted">${escapeHtml(campaign.schedule ?? "schedule unavailable")}</span>
+              </div>
+            </div>`;
+          })
+          .join("\n")}</div>`;
+
   return `
   <main class="reveal">
     ${m.pulse ? renderPulseStrip(m.pulse) : ""}
     ${m.pulse ? renderLiveTiles(m.pulse) : fallbackTiles}
     ${renderPersonaPerformance(m)}
     ${m.pulse ? renderInboxHealthTable(m.pulse) : ""}
+    <h2>Owner controls</h2>
+    <section class="control-card">
+      <p class="muted" style="margin-top:0">Every change requires confirmation and a reason. Bruno records the before/after state in the audit log.</p>
+      ${controls}
+    </section>
     <h2>Last 7 days</h2>
     ${table}
   </main>`;
@@ -834,6 +1090,32 @@ export interface SystemModel {
   groups: Array<{ name: string; count: number; last_failed_at: string; latest_error: string | null }>;
   instantlyOk: boolean;
   claudeOk: boolean;
+  sync: Array<{
+    stream: string;
+    status: string;
+    records: number;
+    currentRecords?: number;
+    lastSuccessAt?: string;
+    error?: string;
+  }>;
+  reconciliation: Array<{
+    scope: string;
+    matches: boolean;
+    providerLeads?: number;
+    localLeads?: number;
+    providerSent?: number;
+    localSent?: number;
+    at: string;
+  }>;
+  actions: Array<{
+    action: string;
+    targetType: string;
+    targetId?: string;
+    actor: string;
+    reason?: string;
+    status: string;
+    at: string;
+  }>;
 }
 
 /** Translate the most common raw errors into owner language. */
@@ -847,6 +1129,9 @@ function plainError(error: string | null) {
   }
   if (/ECONNREFUSED|ETIMEDOUT|fetch failed|ENOTFOUND/i.test(error)) {
     return "a network problem reaching an outside service — usually temporary.";
+  }
+  if (/relation "sync_checkpoints" does not exist/i.test(error)) {
+    return "this happened before the visibility migration was applied. If Data visibility now says ok, this old failure is safe to clear and does not need a retry.";
   }
   return undefined;
 }
@@ -870,6 +1155,10 @@ export function renderSystemPage(s: SystemModel, now: Date) {
       `${s.failed} background task${s.failed === 1 ? "" : "s"} gave up after retrying.${translated ? ` In plain terms: ${translated}` : ""}`
     );
   }
+  const badSync = s.sync.find((stream) => stream.status === "error");
+  if (badSync) problems.push(`The ${escapeHtml(badSync.stream)} synchronization is failing. CRM visibility may be incomplete until it recovers.`);
+  const mismatch = s.reconciliation.find((run) => !run.matches);
+  if (mismatch) problems.push(`The latest ${escapeHtml(mismatch.scope)} reconciliation found a provider/local mismatch.`);
 
   const hero =
     problems.length === 0
@@ -915,9 +1204,66 @@ export function renderSystemPage(s: SystemModel, now: Date) {
         <span class="send-note mono">clearing deletes the failure records only — the schedules keep running</span>
       </div>`;
 
+  const syncCards =
+    s.sync.length === 0
+      ? `<p class="muted">Sync has not completed its first pass yet.</p>`
+      : `<div class="sync-grid">${s.sync
+          .map(
+            (stream) => `<div class="sync-card">
+              <strong>${escapeHtml(stream.stream)}</strong>
+              <span class="mono ${stream.status === "error" ? "sync-error" : "muted"}">${escapeHtml(stream.status)} · ${
+                stream.currentRecords !== undefined
+                  ? `${stream.currentRecords.toLocaleString("en-US")} current · ${stream.records.toLocaleString("en-US")} rows processed`
+                  : `${stream.records.toLocaleString("en-US")} rows processed`
+              }${stream.lastSuccessAt ? ` · ${relativeTime(stream.lastSuccessAt, now)}` : ""}</span>
+              ${stream.error ? `<div class="sync-error mono">${escapeHtml(stream.error.slice(0, 500))}</div>` : ""}
+            </div>`
+          )
+          .join("\n")}</div>`;
+  const reconciliationRows =
+    s.reconciliation.length === 0
+      ? `<p class="muted">No reconciliation pass has finished yet.</p>`
+      : `<div class="table-scroll"><table>
+          <thead><tr><th>Scope</th><th>Result</th><th class="num">Leads · provider/local</th><th class="num">Sent · provider/local</th><th>Checked</th></tr></thead>
+          <tbody>${s.reconciliation
+            .map(
+              (run) => `<tr>
+                <td>${escapeHtml(run.scope)}</td>
+                <td>${run.matches ? `<span class="ok-text">matches</span>` : `<span class="warn-text">mismatch</span>`}</td>
+                <td class="mono num">${run.providerLeads ?? "—"} / ${run.localLeads ?? "—"}</td>
+                <td class="mono num">${run.providerSent ?? "—"} / ${run.localSent ?? "—"}</td>
+                <td class="mono">${relativeTime(run.at, now)}</td>
+              </tr>`
+            )
+            .join("\n")}</tbody>
+        </table></div>`;
+  const actionRows =
+    s.actions.length === 0
+      ? `<p class="muted">No owner or agent control changes recorded.</p>`
+      : `<div class="table-scroll"><table>
+          <thead><tr><th>Action</th><th>Target</th><th>Actor</th><th>Reason</th><th>When</th></tr></thead>
+          <tbody>${s.actions
+            .map(
+              (action) => `<tr>
+                <td><span class="mono">${escapeHtml(action.action)}</span> · ${escapeHtml(action.status)}</td>
+                <td>${escapeHtml(action.targetType)}${action.targetId ? `<div class="mono muted">${escapeHtml(action.targetId)}</div>` : ""}</td>
+                <td>${escapeHtml(action.actor)}</td>
+                <td>${escapeHtml(action.reason ?? "—")}</td>
+                <td class="mono">${relativeTime(action.at, now)}</td>
+              </tr>`
+            )
+            .join("\n")}</tbody>
+        </table></div>`;
+
   return `
   <main class="reveal">
     ${hero}
+    <h2>Data visibility</h2>
+    ${syncCards}
+    <h2>Provider reconciliation</h2>
+    ${reconciliationRows}
+    <h2>Control audit</h2>
+    ${actionRows}
     <details class="tech">
       <summary class="mono">Technical details</summary>
       <section class="kpis kpis-3" style="margin-top:16px">

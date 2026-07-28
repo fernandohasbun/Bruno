@@ -6,8 +6,15 @@ import { processDailyDigestJob } from "../jobs/processDailyDigest.js";
 import { processWeeklyAnalyticsJob } from "../jobs/processWeeklyAnalytics.js";
 import { processOutboundAgentReplyJob } from "../jobs/processOutboundAgentReply.js";
 import { processReplyPollJob } from "../jobs/processReplyPoll.js";
+import { processReplyRetargetJob } from "../jobs/processReplyRetarget.js";
 import { processMetricsRollupJob } from "../jobs/processMetricsRollup.js";
 import { processWatchdogJob } from "../jobs/processWatchdog.js";
+import {
+  processCrmLeadSyncJob,
+  processCrmMessageSyncJob,
+  processCrmReconcileJob
+} from "../jobs/processCrmSync.js";
+import { processLearningReviewJob } from "../jobs/processLearningReview.js";
 import { postSlackReply } from "../integrations/slack.js";
 import { notifyAlert } from "../integrations/notify.js";
 
@@ -21,6 +28,9 @@ export async function processJob(job: QueueJob) {
     case "reply.poll":
       await processReplyPollJob(job);
       return;
+    case "reply.retarget":
+      await processReplyRetargetJob(job);
+      return;
     case "metrics.rollup":
       await processMetricsRollupJob(job);
       return;
@@ -32,6 +42,18 @@ export async function processJob(job: QueueJob) {
       return;
     case "weekly.analytics":
       await processWeeklyAnalyticsJob(job);
+      return;
+    case "learning.review":
+      await processLearningReviewJob(job);
+      return;
+    case "crm.leads.sync":
+      await processCrmLeadSyncJob(job);
+      return;
+    case "crm.messages.sync":
+      await processCrmMessageSyncJob(job);
+      return;
+    case "crm.reconcile":
+      await processCrmReconcileJob(job);
       return;
     case "outbound.agent.reply":
       await processOutboundAgentReplyJob(job);

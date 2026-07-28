@@ -16,7 +16,7 @@ export interface SessionView {
 }
 
 export interface ShellContext {
-  active: "bruno" | "inbox" | "leads" | "campaign" | "system";
+  active: "bruno" | "inbox" | "leads" | "activity" | "campaign" | "learning" | "system";
   title: string;
   pendingCount: number;
   failedJobs: number;
@@ -99,8 +99,12 @@ const ICONS: Record<ShellContext["active"], string> = {
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>',
   leads:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
+  activity:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/><path d="M8 8h8M8 12h5"/></svg>',
   campaign:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>',
+  learning:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 0 0-4 12.74V18h8v-3.26A7 7 0 0 0 12 2z"/><path d="M9 22h6M9 18h6"/></svg>',
   system:
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>'
 };
@@ -108,7 +112,9 @@ const ICONS: Record<ShellContext["active"], string> = {
 const NAV_ITEMS: Array<{ key: ShellContext["active"]; href: string; label: string }> = [
   { key: "inbox", href: "/dashboard/inbox", label: "Inbox" },
   { key: "leads", href: "/dashboard/leads", label: "Leads" },
+  { key: "activity", href: "/dashboard/activity", label: "Activity" },
   { key: "campaign", href: "/dashboard/campaign", label: "Campaign" },
+  { key: "learning", href: "/dashboard/learning", label: "Learning" },
   { key: "system", href: "/dashboard/system", label: "System" }
 ];
 
@@ -380,6 +386,79 @@ export function renderShell(ctx: ShellContext, contentHtml: string) {
     color: var(--ink); font: inherit; font-size: 12.5px; padding: 7px 14px; outline: none;
   }
   .crm-search:focus { border-color: var(--accent); }
+  .crm-select, .crm-date {
+    background: var(--surface); border: 1px solid var(--hairline-2); border-radius: 999px;
+    color: var(--ink-2); font: var(--mono); font-size: 11px; padding: 7px 12px; outline: none;
+  }
+  .crm-select:focus, .crm-date:focus { border-color: var(--accent); }
+  .crm-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+  .crm-stat {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .crm-stat strong { display: block; font-family: var(--display); font-size: 23px; color: #fff; line-height: 1.1; }
+  .crm-stat span { color: var(--muted); font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+  .pager {
+    display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+    padding: 12px 2px 0;
+  }
+  .pager a { text-decoration: none; }
+  .ledger-row { cursor: pointer; }
+  .ledger-row:hover td { background: rgba(110,115,255,0.055); }
+  .direction {
+    display: inline-flex; min-width: 68px; justify-content: center;
+    border-radius: 999px; padding: 3px 8px; font-family: var(--mono);
+    font-size: 9px; letter-spacing: .08em; text-transform: uppercase;
+  }
+  .direction-sent { color: var(--accent-mid); background: var(--accent-soft); }
+  .direction-received { color: #ff956f; background: rgba(240,78,35,.14); }
+  .direction-manual { color: var(--ok); background: var(--ok-soft); }
+  .ledger-preview { max-width: 440px; color: var(--ink-2); }
+  .ledger-detail td { padding: 0; }
+  .ledger-detail[hidden] { display: none; }
+  .ledger-message {
+    margin: 2px 8px 12px; padding: 14px 16px; white-space: pre-wrap;
+    border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0;
+    background: var(--surface-2); color: var(--ink); font-size: 13px;
+    max-height: 360px; overflow: auto;
+  }
+  .lesson-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+  .lesson {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 12px;
+    padding: 16px; display: flex; flex-direction: column; gap: 10px;
+  }
+  .lesson.lesson-proposed { border-color: rgba(251,191,36,.4); }
+  .lesson.lesson-active { border-color: rgba(52,211,116,.35); }
+  .lesson-head { display: flex; align-items: center; gap: 8px; }
+  .lesson-head .confidence { margin-left: auto; color: var(--muted); }
+  .lesson-text { font-size: 14px; color: var(--ink); line-height: 1.6; }
+  .lesson-evidence {
+    color: var(--muted); font-family: var(--mono); font-size: 10.5px;
+    white-space: pre-wrap; overflow-wrap: anywhere; max-height: 130px; overflow-y: auto;
+  }
+  .lesson-actions { display: flex; gap: 8px; align-items: center; margin-top: auto; }
+  .control-card {
+    background: linear-gradient(135deg, rgba(110,115,255,.08), rgba(240,78,35,.035));
+    border: 1px solid var(--hairline-2); border-radius: 12px; padding: 16px;
+  }
+  .control-list { display: flex; flex-direction: column; gap: 8px; }
+  .control-row {
+    display: grid; grid-template-columns: minmax(220px, 1fr) 110px 110px 1fr;
+    align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--hairline);
+  }
+  .control-row:last-child { border-bottom: none; }
+  .control-name strong { display: block; color: var(--ink); }
+  .control-name span { color: var(--muted); }
+  .limit-input {
+    width: 90px; background: var(--page); border: 1px solid var(--hairline-2);
+    border-radius: 7px; color: var(--ink); font: var(--mono); padding: 7px 8px;
+  }
+  .sync-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 16px; }
+  .sync-card {
+    background: var(--surface); border: 1px solid var(--hairline); border-radius: 10px; padding: 13px 14px;
+  }
+  .sync-card strong { display: block; color: var(--ink); }
+  .sync-error { color: var(--danger); overflow-wrap: anywhere; }
 
   .side-foot { margin-top: auto; padding: 14px; border-top: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 8px; }
   .chip {
@@ -729,6 +808,12 @@ export function renderShell(ctx: ShellContext, contentHtml: string) {
     main { padding: 14px 16px 60px; }
     .topbar { padding: 14px 16px 0; }
     .suggestions { grid-template-columns: 1fr; }
+    .crm-summary, .lesson-grid, .sync-grid { grid-template-columns: 1fr 1fr; }
+    .control-row { grid-template-columns: 1fr auto; }
+    .control-row .control-meta { grid-column: 1 / -1; }
+  }
+  @media (max-width: 560px) {
+    .crm-summary, .lesson-grid, .sync-grid { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -1106,9 +1191,9 @@ ${renderDock(ctx)}
         row.style.display = tagOk && textOk ? "" : "none";
       });
     }
-    document.querySelectorAll(".crm-tab").forEach(function (tab) {
+    document.querySelectorAll(".crm-tab[data-crm-filter]").forEach(function (tab) {
       tab.addEventListener("click", function () {
-        document.querySelectorAll(".crm-tab").forEach(function (t) { t.classList.remove("sel"); });
+        document.querySelectorAll(".crm-tab[data-crm-filter]").forEach(function (t) { t.classList.remove("sel"); });
         tab.classList.add("sel");
         activeTag = tab.getAttribute("data-crm-filter").replace(" ", "-");
         if (activeTag === "all") activeTag = "all";
@@ -1123,6 +1208,88 @@ ${renderDock(ctx)}
       });
     }
   }
+
+  /* ——— Message ledger row expansion ——— */
+  document.querySelectorAll("[data-ledger-row]").forEach(function (row) {
+    row.addEventListener("click", function (event) {
+      if (event.target.closest("a,button,input,select")) return;
+      var id = row.getAttribute("data-ledger-row");
+      var detail = document.querySelector("[data-ledger-detail=\\"" + id + "\\"]");
+      if (detail) detail.hidden = !detail.hidden;
+    });
+  });
+
+  /* ——— Human-approved lessons ——— */
+  document.querySelectorAll("button[data-lesson-status]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var id = button.getAttribute("data-lesson-id");
+      var status = button.getAttribute("data-lesson-status");
+      var label = status === "active" ? "activate" : status;
+      if (!confirm(label.charAt(0).toUpperCase() + label.slice(1) + " this lesson? Active lessons change Bruno's future drafting guidance.")) return;
+      button.disabled = true;
+      fetch("/dashboard/api/lessons/" + encodeURIComponent(id) + "/status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: status, confirmed: true })
+      }).then(function (response) {
+        if (response.ok) location.reload();
+        else return response.json().then(function (body) { button.disabled = false; alert((body && body.error) || "Action failed."); });
+      }).catch(function () { button.disabled = false; alert("Network error — try again."); });
+    });
+  });
+
+  var lessonForm = document.querySelector("[data-lesson-form]");
+  if (lessonForm) {
+    lessonForm.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var lesson = lessonForm.querySelector("[name=lesson]").value.trim();
+      var kind = lessonForm.querySelector("[name=kind]").value;
+      if (!lesson) return;
+      if (!confirm("Propose this as a lesson for review? It will not affect Bruno until it is activated.")) return;
+      var button = lessonForm.querySelector("button[type=submit]");
+      button.disabled = true;
+      fetch("/dashboard/api/lessons", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ lesson: lesson, kind: kind })
+      }).then(function (response) {
+        if (response.ok) location.reload();
+        else return response.json().then(function (body) { button.disabled = false; alert((body && body.error) || "Action failed."); });
+      }).catch(function () { button.disabled = false; alert("Network error — try again."); });
+    });
+  }
+
+  /* ——— Confirmed campaign controls with an audit reason ——— */
+  document.querySelectorAll("button[data-campaign-action]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var campaignId = button.getAttribute("data-campaign-id");
+      var action = button.getAttribute("data-campaign-action");
+      var campaignName = button.getAttribute("data-campaign-name");
+      var reason = prompt("Why are you changing " + campaignName + "? This reason is saved in the audit log.");
+      if (!reason || !reason.trim()) return;
+      var body = { action: action, reason: reason.trim(), confirmed: true };
+      if (action === "daily_limit") {
+        var input = document.querySelector("[data-limit-input=\\"" + campaignId + "\\"]");
+        var dailyLimit = Number(input && input.value);
+        if (!Number.isInteger(dailyLimit) || dailyLimit < 1 || dailyLimit > 500) {
+          alert("Enter a daily limit from 1 to 500.");
+          return;
+        }
+        body.dailyLimit = dailyLimit;
+      }
+      var exact = action === "pause" ? "pause" : action === "resume" ? "resume" : "change the daily limit for";
+      if (!confirm("Confirm: " + exact + " " + campaignName + "?")) return;
+      button.disabled = true;
+      fetch("/dashboard/api/campaigns/" + encodeURIComponent(campaignId) + "/action", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      }).then(function (response) {
+        if (response.ok) location.reload();
+        else return response.json().then(function (result) { button.disabled = false; alert((result && result.error) || "Action failed."); });
+      }).catch(function () { button.disabled = false; alert("Network error — try again."); });
+    });
+  });
 
   /* ——— Lead pipeline status ——— */
   var interestForm = document.querySelector("[data-interest-form]");
@@ -1156,11 +1323,13 @@ ${renderDock(ctx)}
       var paused = pauseButton.getAttribute("data-paused") === "true";
       var verb = paused ? "Resume" : "Pause";
       if (!confirm(verb + " Bruno? " + (paused ? "He will start processing replies again." : "He will stop classifying and drafting until resumed."))) return;
+      var reason = prompt("Why are you making this change? The reason is saved in the audit log.");
+      if (!reason || !reason.trim()) return;
       pauseButton.disabled = true;
       fetch("/dashboard/api/agent/pause", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ paused: !paused })
+        body: JSON.stringify({ paused: !paused, reason: reason.trim(), confirmed: true })
       }).then(function (response) {
         if (response.ok) location.reload();
         else pauseButton.disabled = false;

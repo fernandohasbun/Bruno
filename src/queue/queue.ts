@@ -4,11 +4,16 @@ export type JobName =
   | "instantly.event.received"
   | "reply.poll"
   | "reply.classify"
+  | "reply.retarget"
   | "lead.score"
   | "metrics.rollup"
   | "watchdog.check"
   | "daily.digest"
   | "weekly.analytics"
+  | "learning.review"
+  | "crm.leads.sync"
+  | "crm.messages.sync"
+  | "crm.reconcile"
   | "outbound.agent.reply";
 
 export interface QueueJob<T = unknown> {
@@ -30,6 +35,31 @@ export async function enqueueJob(name: JobName, payload: unknown, options?: { ru
   );
 
   return result.rows[0].id;
+}
+
+/** Enqueue a singleton maintenance job only when the same job is not already queued or running. */
+export async function enqueueJobIfIdle(
+  name: JobName,
+  payload: unknown,
+  options?: { runAfter?: Date; maxAttempts?: number }
+) {
+  const result = await pool.query<{ id: string }>(
+    `
+      WITH locked AS (
+        SELECT pg_advisory_xact_lock(hashtext('bruno:queue:' || $1::text))
+      )
+      INSERT INTO jobs (name, payload, run_after, max_attempts)
+      SELECT $1, $2::jsonb, $3, $4
+      FROM locked
+      WHERE NOT EXISTS (
+        SELECT 1 FROM jobs
+        WHERE name = $1 AND status IN ('queued', 'running')
+      )
+      RETURNING id
+    `,
+    [name, JSON.stringify(payload), options?.runAfter ?? new Date(), options?.maxAttempts ?? 5]
+  );
+  return result.rows[0]?.id;
 }
 
 export async function claimNextJob(): Promise<QueueJob | null> {

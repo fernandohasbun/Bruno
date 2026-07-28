@@ -23,6 +23,9 @@ export function normalizeInstantlyEvent(body: unknown): InstantlyEvent {
     companyName: stringOrUndefined(data.company ?? data.company_name),
     campaignId: stringOrUndefined(data.campaign_id),
     leadId: stringOrUndefined(data.lead_id ?? data.id),
+    // Carried separately from the body: "Automatic reply:" / "Out of Office" in the
+    // subject is the single strongest out-of-office signal we get.
+    subject: stringOrUndefined(data.subject),
     threadText: stringOrUndefined(data.thread_text ?? data.reply_text ?? bodyText ?? data.content_preview ?? data.message),
     raw: payload
   };

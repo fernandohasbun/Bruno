@@ -38,10 +38,29 @@ import {
 } from "../db/metrics.js";
 import { cachedFetch, deleteCachedValue } from "../db/cache.js";
 import { clearFailedJobs, getFailedJobGroups, retryLatestFailedJob } from "../db/ops.js";
+import {
+  getCrmLeadByEmail,
+  getCrmMessageSummary,
+  getCrmSummary,
+  getLatestReconciliation,
+  listCrmLeadMessages,
+  listCrmLeadsPage,
+  listCrmMessagesPage,
+  listRecentAgentActions,
+  listSyncCheckpoints,
+  recordAgentAction
+} from "../db/crm.js";
+import {
+  createLesson,
+  listLessons,
+  setLessonStatus,
+  type LessonKind,
+  type LessonStatus
+} from "../db/lessons.js";
 import { hasClaudeKey } from "../integrations/claude.js";
 import { UPDATES_THREAD_KEY } from "../integrations/notify.js";
 import {
-  countCampaignLeads,
+  activateInstantlyCampaign,
   getCampaignAnalyticsOverview,
   getInstantlyCampaign,
   getLeadEngagement,
@@ -52,6 +71,8 @@ import {
   listInstantlyCampaigns,
   listLeadEmails,
   listLeadRecordsPage,
+  patchInstantlyCampaign,
+  pauseInstantlyCampaign,
   sendReplyEmail,
   setLeadInterest,
   type InstantlyLeadEngagement,
@@ -60,10 +81,12 @@ import {
 } from "../integrations/instantly.js";
 import {
   renderBrunoPage,
+  renderActivityPage,
   renderCampaignPage,
   renderInboxPage,
   renderLeadPage,
   renderLeadsPage,
+  renderLearningPage,
   renderSearchPage,
   renderSystemPage,
   type CrmRow,
@@ -344,19 +367,22 @@ function campaignStatusLabel(status?: number) {
 async function loadCampaignPulse(): Promise<CampaignPulse | null> {
   try {
     return await cachedFetch<CampaignPulse | null>("instantly:pulse:v2", 300, async () => {
-      const campaigns = await listInstantlyCampaigns({ limit: 100 });
+      const [campaigns, crmSummary, checkpoints] = await Promise.all([
+        listInstantlyCampaigns({ limit: 100 }),
+        getCrmSummary(),
+        listSyncCheckpoints()
+      ]);
       if (campaigns.length === 0) return null;
       const personaCampaigns = campaigns.filter((campaign) => campaign.name.startsWith("Kinta | P"));
       const selected = personaCampaigns.length > 0 ? personaCampaigns : [campaigns[0]];
 
       const snapshots = await Promise.all(
         selected.map(async (campaign) => {
-          const [detail, analytics, leadCount] = await Promise.allSettled([
+          const [detail, analytics] = await Promise.allSettled([
             getInstantlyCampaign(campaign.id),
-            getCampaignAnalyticsOverview(campaign.id),
-            countCampaignLeads({ campaignId: campaign.id, maxPages: 3 })
+            getCampaignAnalyticsOverview(campaign.id)
           ]);
-          return { campaign, detail, analytics, leadCount };
+          return { campaign, detail, analytics };
         })
       );
       const senderEmails = [
@@ -377,9 +403,12 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
       const analytics = snapshots
         .filter((snapshot) => snapshot.analytics.status === "fulfilled")
         .map((snapshot) => (snapshot.analytics as PromiseFulfilledResult<Awaited<ReturnType<typeof getCampaignAnalyticsOverview>>>).value);
-      const counts = snapshots
-        .filter((snapshot) => snapshot.leadCount.status === "fulfilled")
-        .map((snapshot) => (snapshot.leadCount as PromiseFulfilledResult<Awaited<ReturnType<typeof countCampaignLeads>>>).value);
+      const leadSyncComplete = checkpoints.some(
+        (checkpoint) => checkpoint.stream === "crm.leads.full" && checkpoint.status === "ok" && checkpoint.last_success_at
+      );
+      const countsByCampaign = new Map(
+        crmSummary.campaigns.map((item) => [item.campaignId, item.total])
+      );
       const dailyLimits = details
         .map((detail) => (detail as unknown as { daily_limit?: number }).daily_limit)
         .filter((limit): limit is number => typeof limit === "number");
@@ -412,8 +441,10 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
         dailyLimit: dailyLimits.length === selected.length ? dailyLimits.reduce((sum, limit) => sum + limit, 0) : undefined,
         openTracking: details.length === selected.length ? details.every((detail) => detail.open_tracking === true) : undefined,
         linkTracking: details.length === selected.length ? details.every((detail) => detail.link_tracking === true) : undefined,
-        leadCount: counts.length === selected.length ? counts.reduce((sum, count) => sum + count.count, 0) : undefined,
-        leadCountCapped: counts.some((count) => count.capped),
+        leadCount: leadSyncComplete
+          ? selected.reduce((sum, campaign) => sum + (countsByCampaign.get(campaign.id) ?? 0), 0)
+          : undefined,
+        leadCountCapped: false,
         sent: analytics.reduce((sum, item) => sum + item.emails_sent_count, 0),
         contacted: analytics.reduce((sum, item) => sum + item.contacted_count, 0),
         opensUnique: analytics.reduce((sum, item) => sum + item.open_count_unique, 0),
@@ -435,6 +466,46 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
     });
   } catch {
     return null;
+  }
+}
+
+function scheduleLabel(value: unknown) {
+  const root = (value ?? {}) as { schedules?: unknown };
+  if (!Array.isArray(root.schedules) || root.schedules.length === 0) return undefined;
+  const schedule = (root.schedules[0] ?? {}) as {
+    timing?: { from?: unknown; to?: unknown };
+    days?: Record<string, unknown>;
+    timezone?: unknown;
+  };
+  const activeDays = Object.entries(schedule.days ?? {})
+    .filter(([, enabled]) => enabled === true)
+    .map(([day]) => ({ "0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "Fri", "6": "Sat" }[day] ?? day))
+    .join(", ");
+  const from = typeof schedule.timing?.from === "string" ? schedule.timing.from : "?";
+  const to = typeof schedule.timing?.to === "string" ? schedule.timing.to : "?";
+  const timezone = typeof schedule.timezone === "string" ? schedule.timezone : "campaign timezone";
+  return `${activeDays || "no active days"} · ${from}–${to} · ${timezone}`;
+}
+
+async function loadManagedCampaignControls() {
+  try {
+    const campaigns = (await listInstantlyCampaigns({ limit: 100 })).filter((campaign) =>
+      KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
+    );
+    const details = await Promise.allSettled(campaigns.map((campaign) => getInstantlyCampaign(campaign.id)));
+    return campaigns.map((campaign, index) => {
+      const result = details[index];
+      const detail = result.status === "fulfilled" ? result.value : undefined;
+      return {
+        id: campaign.id,
+        name: campaign.name,
+        status: campaignStatusLabel(detail?.status ?? campaign.status),
+        dailyLimit: detail?.daily_limit ?? undefined,
+        schedule: scheduleLabel(detail?.campaign_schedule)
+      };
+    });
+  } catch {
+    return [];
   }
 }
 
@@ -583,11 +654,12 @@ export async function registerDashboard(app: FastifyInstance) {
   // Campaign — is the machine sending, and is it working?
   app.get("/dashboard/campaign", async (request, reply) => {
     if (!authorizePage(request, reply, "/dashboard/campaign")) return reply;
-    const [shell, dailyRows, pulse, profitability] = await Promise.all([
+    const [shell, dailyRows, pulse, profitability, controls] = await Promise.all([
       loadShellContext("campaign", "Campaign", true),
       listRecentDailyMetrics(7),
       loadCampaignPulse(),
-      listPersonaProfitability()
+      listPersonaProfitability(),
+      loadManagedCampaignControls()
     ]);
 
     // metrics_daily has one row per (date, campaign); collapse to one row per date.
@@ -614,7 +686,8 @@ export async function registerDashboard(app: FastifyInstance) {
           positive7d: daily.reduce((sum, day) => sum + day.positive, 0),
           daily,
           pulse: pulse ?? undefined,
-          profitability
+          profitability,
+          controls
         })
       )
     );
@@ -623,13 +696,30 @@ export async function registerDashboard(app: FastifyInstance) {
   // System — one honest sentence; tech behind a toggle
   app.get("/dashboard/system", async (request, reply) => {
     if (!authorizePage(request, reply, "/dashboard/system")) return reply;
-    const [shell, queue, oldestQueuedMinutes, groups, lastPollAt, pulse] = await Promise.all([
+    const [
+      shell,
+      queue,
+      oldestQueuedMinutes,
+      groups,
+      lastPollAt,
+      pulse,
+      sync,
+      reconciliation,
+      actions,
+      crmSummary,
+      messageSummary
+    ] = await Promise.all([
       loadShellContext("system", "System", true),
       getQueueSummary(),
       getOldestQueuedJobAgeMinutes(),
       getFailedJobGroups(),
       getConfigValue<string>("last_poll_success_at"),
-      loadCampaignPulse()
+      loadCampaignPulse(),
+      listSyncCheckpoints(),
+      getLatestReconciliation(),
+      listRecentAgentActions(30),
+      getCrmSummary(),
+      getCrmMessageSummary()
     ]);
     const pollAgeMinutes = minutesSince(lastPollAt);
     return reply.type("text/html").send(
@@ -646,7 +736,38 @@ export async function registerDashboard(app: FastifyInstance) {
             lastPollStale: !shell.agentPaused && pollAgeMinutes !== undefined && pollAgeMinutes > 15,
             groups,
             instantlyOk: pulse !== null,
-            claudeOk: hasClaudeKey()
+            claudeOk: hasClaudeKey(),
+            sync: sync.map((stream) => ({
+              stream: stream.stream,
+              status: stream.cursor ? "backfilling" : stream.status,
+              records: stream.records_synced,
+              currentRecords:
+                stream.stream === "crm.leads.full"
+                  ? crmSummary.total
+                  : stream.stream === "crm.messages.incremental"
+                    ? messageSummary.total
+                    : undefined,
+              lastSuccessAt: stream.last_success_at ?? undefined,
+              error: stream.last_error ?? undefined
+            })),
+            reconciliation: reconciliation.map((run) => ({
+              scope: run.scope,
+              matches: run.matches,
+              providerLeads: run.provider_leads ?? undefined,
+              localLeads: run.local_leads ?? undefined,
+              providerSent: run.provider_sent ?? undefined,
+              localSent: run.local_sent ?? undefined,
+              at: run.reconciled_at
+            })),
+            actions: actions.map((action) => ({
+              action: action.action,
+              targetType: action.target_type,
+              targetId: action.target_id ?? undefined,
+              actor: action.actor,
+              reason: action.reason ?? undefined,
+              status: action.status,
+              at: action.created_at
+            }))
           },
           shell.generatedAt
         )
@@ -661,26 +782,58 @@ export async function registerDashboard(app: FastifyInstance) {
     if (typeof emailRaw !== "string" || !emailRaw.includes("@")) return reply.redirect("/dashboard/leads", 302);
     const email = emailRaw.trim().toLowerCase();
 
-    const [shell, pulse, activity] = await Promise.all([
+    const [shell, pulse, activity, localLeadResult, localMessagesResult] = await Promise.all([
       loadShellContext("leads", "Lead", true),
       loadCampaignPulse(),
-      getLeadActivity(email)
+      getLeadActivity(email),
+      getCrmLeadByEmail(email).catch(() => undefined),
+      listCrmLeadMessages(email, 1000).catch(() => [])
     ]);
 
     let record: InstantlyLeadRecord | null = null;
     let thread: LeadEmailItem[] = [];
     let threadUnavailable = false;
-    try {
-      record = await cachedFetch<InstantlyLeadRecord | null>(`lead-rec:${email}`, 600, async () => {
-        return (await getLeadRecord({ email, campaignId: pulse?.campaignId })) ?? null;
-      });
-    } catch {
-      record = null;
+    if (localLeadResult) {
+      record = {
+        id: localLeadResult.provider_lead_id,
+        email: localLeadResult.email,
+        campaignId: localLeadResult.campaign_id ?? undefined,
+        firstName: localLeadResult.first_name ?? undefined,
+        lastName: localLeadResult.last_name ?? undefined,
+        companyName: localLeadResult.company_name ?? undefined,
+        jobTitle: localLeadResult.job_title ?? undefined,
+        status: localLeadResult.status ?? undefined,
+        interestStatus: localLeadResult.interest_status ?? undefined,
+        openCount: localLeadResult.email_open_count,
+        clickCount: localLeadResult.email_click_count,
+        replyCount: localLeadResult.email_reply_count,
+        lastContactAt: localLeadResult.last_contact_at ?? undefined,
+        customFields: localLeadResult.custom_fields
+      };
+    } else {
+      try {
+        record = await cachedFetch<InstantlyLeadRecord | null>(`lead-rec:${email}`, 600, async () => {
+          return (await getLeadRecord({ email, campaignId: pulse?.campaignId })) ?? null;
+        });
+      } catch {
+        record = null;
+      }
     }
-    try {
-      thread = await cachedFetch<LeadEmailItem[]>(`lead-thread:${email}`, 300, () => listLeadEmails({ leadEmail: email, limit: 50 }));
-    } catch {
-      threadUnavailable = true;
+    if (localMessagesResult.length > 0) {
+      thread = localMessagesResult.map((message) => ({
+        id: message.provider_email_id,
+        direction: message.direction === "received" ? "received" : "sent",
+        at: message.timestamp_email ?? message.provider_created_at ?? message.synced_at,
+        subject: message.subject ?? undefined,
+        from: message.eaccount ?? undefined,
+        text: message.body_text ?? message.content_preview ?? undefined
+      }));
+    } else {
+      try {
+        thread = await cachedFetch<LeadEmailItem[]>(`lead-thread:${email}`, 300, () => listLeadEmails({ leadEmail: email, limit: 50 }));
+      } catch {
+        threadUnavailable = true;
+      }
     }
 
     const timeline: TimelineItem[] = [];
@@ -743,52 +896,171 @@ export async function registerDashboard(app: FastifyInstance) {
   // Leads — the CRM view
   app.get("/dashboard/leads", async (request, reply) => {
     if (!authorizePage(request, reply, "/dashboard/leads")) return reply;
-    const [shell, pulse] = await Promise.all([loadShellContext("leads", "Leads", true), loadCampaignPulse()]);
+    const query = request.query as Record<string, unknown>;
+    const page = Math.max(1, Number.parseInt(typeof query.page === "string" ? query.page : "1", 10) || 1);
+    const search = typeof query.q === "string" ? query.q.trim().slice(0, 200) : undefined;
+    const allowedViews = ["all", "replied", "interested", "in-sequence", "finished", "suppressed"] as const;
+    const view = allowedViews.includes(query.view as (typeof allowedViews)[number])
+      ? (query.view as (typeof allowedViews)[number])
+      : "all";
+    const [shell, result, summary, checkpoints] = await Promise.all([
+      loadShellContext("leads", "Leads", true),
+      listCrmLeadsPage({ page, pageSize: 50, search, view }),
+      getCrmSummary(),
+      listSyncCheckpoints()
+    ]);
+    const leadSync = checkpoints.find((checkpoint) => checkpoint.stream === "crm.leads.full");
+    const rows: CrmRow[] = result.leads.map((lead) => {
+      const tags: string[] = [];
+      if (lead.email_reply_count > 0) tags.push("replied");
+      if (lead.interest_status !== null && lead.interest_status >= 1) tags.push("interested");
+      if (lead.status === 1 || lead.status === 2) tags.push("in-sequence");
+      if (lead.status === 3) tags.push("finished");
+      if (lead.status !== null && lead.status < 0) tags.push("suppressed");
+      return {
+        email: lead.email,
+        name: [lead.first_name, lead.last_name].filter(Boolean).join(" ") || undefined,
+        company: lead.company_name ?? undefined,
+        persona: lead.custom_fields.persona,
+        targetRole: lead.custom_fields.targetRole ?? lead.job_title ?? undefined,
+        interestLabel: interestStatusLabel(lead.interest_status ?? undefined),
+        sequenceLabel: leadStatusLabel(lead.status ?? undefined),
+        opens: lead.email_open_count,
+        clicks: lead.email_click_count,
+        replies: lead.email_reply_count,
+        lastContactAt: lead.last_contact_at ?? undefined,
+        tags: [...tags, lead.custom_fields.persona, lead.custom_fields.targetRole].filter(Boolean).join(" ").toLowerCase()
+      };
+    });
+    return reply.type("text/html").send(
+      renderShell(
+        shell,
+        renderLeadsPage(
+          {
+            rows,
+            total: result.total,
+            page: result.page,
+            pageSize: result.pageSize,
+            search,
+            view,
+            summary,
+            syncLabel: leadSync?.last_success_at
+              ? `synced ${agoLabel(minutesSince(leadSync.last_success_at))}`
+              : leadSync?.status === "running"
+                ? "first sync running"
+                : "waiting for first sync"
+          },
+          shell.generatedAt
+        )
+      )
+    );
+  });
 
-    let rows: CrmRow[] = [];
-    let capped = false;
-    if (pulse) {
-      try {
-        const leads = await cachedFetch<InstantlyLeadRecord[]>("crm:leads", 600, async () => {
-          const all: InstantlyLeadRecord[] = [];
-          let cursor: string | undefined;
-          let pages = 0;
-          do {
-            const page = await listLeadRecordsPage({ campaignId: pulse.campaignId, limit: 100, startingAfter: cursor });
-            all.push(...page.leads);
-            cursor = page.nextStartingAfter;
-            pages += 1;
-          } while (cursor && pages < 10);
-          return all;
-        });
-        capped = leads.length >= 1000;
-        rows = leads.slice(0, 1000).map((lead) => {
-          const tags: string[] = [];
-          if (lead.replyCount > 0) tags.push("replied");
-          if (lead.interestStatus !== undefined && lead.interestStatus >= 1) tags.push("interested");
-          if (lead.status === 1 || lead.status === 2) tags.push("in-sequence");
-          if (lead.status === 3) tags.push("finished");
-          if (lead.status !== undefined && lead.status < 0) tags.push("suppressed");
-          return {
-            email: lead.email,
-            name: [lead.firstName, lead.lastName].filter(Boolean).join(" ") || undefined,
-            company: lead.companyName,
-            persona: lead.customFields.persona,
-            targetRole: lead.customFields.targetRole,
-            interestLabel: interestStatusLabel(lead.interestStatus),
-            sequenceLabel: leadStatusLabel(lead.status),
-            opens: lead.openCount,
-            clicks: lead.clickCount,
-            replies: lead.replyCount,
-            lastContactAt: lead.lastContactAt,
-            tags: [...tags, lead.customFields.persona, lead.customFields.targetRole].filter(Boolean).join(" ").toLowerCase()
-          };
-        });
-      } catch {
-        rows = [];
-      }
-    }
-    return reply.type("text/html").send(renderShell(shell, renderLeadsPage(rows, shell.generatedAt, capped)));
+  // Activity — exact account-wide message ledger, server-filtered and paginated.
+  app.get("/dashboard/activity", async (request, reply) => {
+    if (!authorizePage(request, reply, "/dashboard/activity")) return reply;
+    const query = request.query as Record<string, unknown>;
+    const page = Math.max(1, Number.parseInt(typeof query.page === "string" ? query.page : "1", 10) || 1);
+    const search = typeof query.q === "string" ? query.q.trim().slice(0, 200) : undefined;
+    const direction =
+      query.direction === "sent" || query.direction === "received" || query.direction === "manual"
+        ? query.direction
+        : undefined;
+    const sender = typeof query.sender === "string" && query.sender.includes("@") ? query.sender : undefined;
+    const from = typeof query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : undefined;
+    const to = typeof query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.to) ? query.to : undefined;
+    const [shell, result, summary, checkpoints, campaignsResult] = await Promise.all([
+      loadShellContext("activity", "Message activity", true),
+      listCrmMessagesPage({
+        page,
+        pageSize: 50,
+        search,
+        direction,
+        eaccount: sender,
+        from: from ? `${from}T00:00:00-06:00` : undefined,
+        to: to ? `${to}T23:59:59.999-06:00` : undefined
+      }),
+      getCrmMessageSummary(),
+      listSyncCheckpoints(),
+      listInstantlyCampaigns({ limit: 100 }).catch(() => [])
+    ]);
+    const campaignNames = new Map(campaignsResult.map((campaign) => [campaign.id, campaign.name]));
+    const messageSync = checkpoints.find((checkpoint) => checkpoint.stream === "crm.messages.incremental");
+    return reply.type("text/html").send(
+      renderShell(
+        shell,
+        renderActivityPage(
+          {
+            messages: result.messages.map((message) => ({
+              id: message.provider_email_id,
+              direction: message.direction,
+              at: message.timestamp_email ?? message.provider_created_at ?? message.synced_at,
+              leadEmail: message.lead_email ?? undefined,
+              campaignName: message.campaign_id ? campaignNames.get(message.campaign_id) ?? message.campaign_id : undefined,
+              sender: message.eaccount ?? undefined,
+              step: message.step ?? undefined,
+              variant: message.variant ?? undefined,
+              subject: message.subject ?? undefined,
+              preview: message.content_preview ?? undefined,
+              bodyText: message.body_text ?? undefined
+            })),
+            total: result.total,
+            page: result.page,
+            pageSize: result.pageSize,
+            search,
+            direction,
+            sender,
+            from,
+            to,
+            summary: {
+              total: summary.total,
+              sent: summary.sent,
+              received: summary.received,
+              manual: summary.manual,
+              leads: summary.leads,
+              senders: summary.senders.map((item) => item.email)
+            },
+            syncLabel: messageSync?.cursor
+              ? `backfill running · ${messageSync.records_synced.toLocaleString("en-US")} imported`
+              : messageSync?.last_success_at
+                ? `synced ${agoLabel(minutesSince(messageSync.last_success_at))}`
+              : messageSync?.status === "running"
+                ? "backfill running"
+                : "waiting for first sync"
+          },
+          shell.generatedAt
+        )
+      )
+    );
+  });
+
+  // Learning — proposed lessons remain inert until the owner activates them.
+  app.get("/dashboard/learning", async (request, reply) => {
+    if (!authorizePage(request, reply, "/dashboard/learning")) return reply;
+    const [shell, lessons] = await Promise.all([
+      loadShellContext("learning", "Learning", true),
+      listLessons({ limit: 200 })
+    ]);
+    return reply.type("text/html").send(
+      renderShell(
+        shell,
+        renderLearningPage(
+          lessons.map((lesson) => ({
+            id: lesson.id,
+            kind: lesson.kind,
+            lesson: lesson.lesson,
+            evidence: lesson.evidence,
+            confidence: lesson.confidence,
+            status: lesson.status,
+            sourceCount: lesson.source_approval_ids.length,
+            proposedBy: lesson.proposed_by,
+            approvedBy: lesson.approved_by ?? undefined,
+            createdAt: lesson.created_at
+          })),
+          shell.generatedAt
+        )
+      )
+    );
   });
 
   // Search — Bruno's records + Instantly's lead database
@@ -798,18 +1070,32 @@ export async function registerDashboard(app: FastifyInstance) {
     const q = typeof qRaw === "string" ? qRaw.trim() : "";
     if (q.length < 2) return reply.redirect("/dashboard/leads", 302);
 
-    const [shell, local, pulse] = await Promise.all([
+    const [shell, local, pulse, mirror] = await Promise.all([
       loadShellContext("leads", "Search", false),
       searchLeadsLocal(q),
-      loadCampaignPulse()
+      loadCampaignPulse(),
+      listCrmLeadsPage({ search: q, pageSize: 50 })
     ]);
 
     const results = new Map<string, SearchResultRow>();
+    for (const lead of mirror.leads) {
+      results.set(lead.email.toLowerCase(), {
+        email: lead.email,
+        name: [lead.first_name, lead.last_name].filter(Boolean).join(" ") || undefined,
+        company: lead.company_name ?? undefined,
+        detail:
+          [lead.job_title, lead.custom_fields.persona, leadStatusLabel(lead.status ?? undefined), interestStatusLabel(lead.interest_status ?? undefined)]
+            .filter(Boolean)
+            .join(" · ") || "in synchronized CRM"
+      });
+    }
     for (const row of local) {
+      const existing = results.get(row.email);
       results.set(row.email, {
         email: row.email,
-        company: row.company_name ?? undefined,
-        detail: `last reply read as ${row.last_intent ?? "?"}`,
+        name: existing?.name,
+        company: existing?.company ?? row.company_name ?? undefined,
+        detail: existing ? `${existing.detail} · last reply read as ${row.last_intent ?? "?"}` : `last reply read as ${row.last_intent ?? "?"}`,
         pendingDraft: row.pending_draft
       });
     }
@@ -842,6 +1128,7 @@ export async function registerDashboard(app: FastifyInstance) {
     if (!parsed.success) return reply.code(400).send({ error: "email and status are required" });
 
     const pulse = await loadCampaignPulse();
+    const before = await getCrmLeadByEmail(parsed.data.email).catch(() => undefined);
     try {
       await setLeadInterest({
         email: parsed.data.email,
@@ -852,9 +1139,148 @@ export async function registerDashboard(app: FastifyInstance) {
       request.log.error({ err: error }, "lead interest update failed");
       return reply.code(502).send({ error: "Instantly rejected the update" });
     }
+    await recordAgentAction({
+      action: "lead.interest_status",
+      targetType: "lead",
+      targetId: parsed.data.email.toLowerCase(),
+      actor: "dashboard",
+      reason: "owner-updated pipeline status",
+      beforeState: { interestStatus: before?.interest_status ?? null },
+      afterState: { interestStatus: parsed.data.status }
+    });
     await deleteCachedValue(`lead-rec:${parsed.data.email.toLowerCase()}`);
     await deleteCachedValue("crm:leads");
     return reply.send({ ok: true });
+  });
+
+  // ————— Approval-gated learning actions —————
+
+  app.post("/dashboard/api/lessons", async (request, reply) => {
+    if (!isAuthorized(request)) return reply.code(401).send({ error: "not authorized" });
+    const parsed = z
+      .object({
+        kind: z.enum(["preference", "copy", "objection", "targeting", "process"]),
+        lesson: z.string().trim().min(5).max(1000)
+      })
+      .safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "kind and lesson are required" });
+    const result = await createLesson({
+      kind: parsed.data.kind as LessonKind,
+      lesson: parsed.data.lesson,
+      evidence: [{ source: "owner_dashboard", at: new Date().toISOString() }],
+      confidence: 1,
+      status: "proposed",
+      proposedBy: "owner"
+    });
+    await recordAgentAction({
+      action: "lesson.propose",
+      targetType: "lesson",
+      targetId: result.lesson.id,
+      actor: "dashboard",
+      reason: "owner-proposed guidance",
+      afterState: result.lesson
+    });
+    return reply.send({ ok: true, lesson: result.lesson, created: result.created });
+  });
+
+  app.post("/dashboard/api/lessons/:id/status", async (request, reply) => {
+    if (!isAuthorized(request)) return reply.code(401).send({ error: "not authorized" });
+    const { id } = request.params as { id: string };
+    const parsed = z
+      .object({
+        status: z.enum(["active", "rejected", "retired"]),
+        confirmed: z.literal(true)
+      })
+      .safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "an explicitly confirmed status is required" });
+    try {
+      const lesson = await setLessonStatus({
+        id,
+        status: parsed.data.status as LessonStatus,
+        actor: "dashboard-owner"
+      });
+      await recordAgentAction({
+        action: `lesson.${parsed.data.status}`,
+        targetType: "lesson",
+        targetId: id,
+        actor: "dashboard",
+        reason: "owner-confirmed learning review",
+        afterState: lesson
+      });
+      return reply.send({ ok: true, lesson });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "lesson update failed";
+      return reply.code(message === "Lesson not found" ? 404 : 500).send({ error: message });
+    }
+  });
+
+  // ————— Confirmed, audited campaign controls —————
+
+  app.post("/dashboard/api/campaigns/:id/action", async (request, reply) => {
+    if (!isAuthorized(request)) return reply.code(401).send({ error: "not authorized" });
+    const { id } = request.params as { id: string };
+    const parsed = z
+      .object({
+        action: z.enum(["pause", "resume", "daily_limit"]),
+        reason: z.string().trim().min(3).max(500),
+        confirmed: z.literal(true),
+        dailyLimit: z.number().int().min(1).max(500).optional()
+      })
+      .superRefine((value, context) => {
+        if (value.action === "daily_limit" && value.dailyLimit === undefined) {
+          context.addIssue({ code: "custom", message: "dailyLimit is required", path: ["dailyLimit"] });
+        }
+      })
+      .safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "a confirmed action and audit reason are required" });
+
+    let before;
+    try {
+      before = await getInstantlyCampaign(id);
+    } catch {
+      return reply.code(404).send({ error: "campaign not found" });
+    }
+    if (!KINTA_PERSONA_CAMPAIGNS.some((campaign) => campaign.name === before.name)) {
+      return reply.code(403).send({ error: "controls are limited to the five managed Kinta persona campaigns" });
+    }
+
+    try {
+      const providerResponse =
+        parsed.data.action === "pause"
+          ? await pauseInstantlyCampaign(id)
+          : parsed.data.action === "resume"
+            ? await activateInstantlyCampaign(id)
+            : await patchInstantlyCampaign(id, {
+                daily_limit: parsed.data.dailyLimit,
+                daily_max_leads: parsed.data.dailyLimit
+              });
+      const after = await getInstantlyCampaign(id).catch(() => providerResponse);
+      await recordAgentAction({
+        action: `campaign.${parsed.data.action}`,
+        targetType: "campaign",
+        targetId: id,
+        actor: "dashboard",
+        reason: parsed.data.reason,
+        beforeState: before,
+        afterState: after,
+        providerResponse
+      });
+      await deleteCachedValue("instantly:pulse:v2");
+      return reply.send({ ok: true, campaign: after });
+    } catch (error) {
+      await recordAgentAction({
+        action: `campaign.${parsed.data.action}`,
+        targetType: "campaign",
+        targetId: id,
+        actor: "dashboard",
+        reason: parsed.data.reason,
+        beforeState: before,
+        status: "failed",
+        providerResponse: { error: error instanceof Error ? error.message : String(error) }
+      });
+      request.log.error({ err: error, campaignId: id }, "campaign control failed");
+      return reply.code(502).send({ error: "Instantly rejected the change; no local state was changed" });
+    }
   });
 
   // ————— Agent chat API —————
@@ -977,10 +1403,26 @@ export async function registerDashboard(app: FastifyInstance) {
   app.post("/dashboard/api/agent/pause", async (request, reply) => {
     if (!isAuthorized(request)) return reply.code(401).send({ error: "not authorized" });
 
-    const parsed = z.object({ paused: z.boolean() }).safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: "paused flag is required" });
+    const parsed = z
+      .object({
+        paused: z.boolean(),
+        reason: z.string().trim().min(3).max(500),
+        confirmed: z.literal(true)
+      })
+      .safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: "a confirmed pause state and audit reason are required" });
 
+    const before = await isAgentPaused();
     await setAgentPaused(parsed.data.paused);
+    await recordAgentAction({
+      action: parsed.data.paused ? "agent.pause" : "agent.resume",
+      targetType: "agent",
+      targetId: "bruno",
+      actor: "dashboard",
+      reason: parsed.data.reason,
+      beforeState: { paused: before },
+      afterState: { paused: parsed.data.paused }
+    });
     return reply.send({ ok: true, paused: parsed.data.paused });
   });
 }

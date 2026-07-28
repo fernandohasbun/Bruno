@@ -8,6 +8,7 @@
     "start": "node dist/db/migrate.js && node dist/server.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
     "migrate": "tsx src/db/migrate.ts",
     "worker": "tsx src/worker.ts",
     "instantly:create-kinta-campaign": "tsx src/tools/upsertKintaCampaign.ts",

@@ -3,12 +3,6 @@
 ## Now
 
 - `list_campaigns`: Instantly campaign names, IDs, and statuses.
-- `get_campaign_configuration`: exact live schedule, limits, inboxes, tracking/safety flags, and sequence variants.
-- `get_crm_summary`: exact synchronized workspace totals and persona/campaign breakdowns.
-- `search_crm`: paginated search across the complete synchronized CRM.
-- `query_messages`: paginated exact sent/received message ledger with sender, step, and variant filters.
-- `get_sync_health`: lead/message checkpoint health and provider/local reconciliation.
-- `get_lead_history`: identity, pipeline, paginated exact message history, Bruno reads, decisions, and suppressions.
 - `get_campaign_performance`: sends, opens, replies, bounces, opportunities, reply/open rates.
 - `list_recent_replies`: recent inbound replies with sender, time, subject, and preview.
 - `count_leads`: total leads loaded in a campaign.
@@ -17,9 +11,6 @@
 - `get_inbox_health`: warmup volume and inbox landing rate.
 - `draft_reply`: classify pasted prospect text and draft a response.
 - `set_agent_paused`: pause/resume the app's internal polling/classify/draft loops.
-- `pause_campaign` / `resume_campaign` / `update_campaign_daily_limit`: confirmed, reasoned, audited controls limited to the five managed Kinta persona campaigns.
-- `list_lessons` / `remember_lesson` / `set_lesson_status`: owner-gated drafting memory.
-- `list_objection_examples`: replies previously approved by a human for objection-handling context.
 
 ## Reply Ops
 
@@ -109,14 +100,3 @@
 - `get_autonomy_level`: show current autonomy settings.
 - `set_spend_limit`: configure daily Claude/tool budget.
 - `get_spend_usage`: current spend/call usage against budget.
-
----
-
-_Repo note (2026-07-13): this is Bruno's canonical tool roadmap, moved in from the
-owner's notes. The "Now" section matches the tools implemented in
-`src/agents/outboundAgent.ts`. The remaining sections map to the unified roadmap in
-`infrastructure-plan.md` §7: Reply Ops → Phase B1–B5 · Campaign Control → B2/D2 ·
-Lead Scoring/Acquisition → B7 · CRM/Instantly State → C1 · Metrics/Analytics →
-A10/C3 · Deliverability → A11/D1 · Learning → C2–C4 · Ops/Safety → A4/A12/B6._
-
-_2026-07-14: `get_lead_history` (from the CRM section's `get_lead`/`get_conversation_thread`/`list_lead_activity` trio) is now implemented in the "Now" set — full per-lead dossier as a tool._

@@ -143,18 +143,19 @@ export function buildKintaCampaignPayload(input: {
     campaign_schedule: {
       schedules: [
         {
-          name: "Tue-Thu mornings EST",
+          name: "Weekday mornings EST",
           timing: {
             from: "07:00",
-            to: "11:00"
+            to: "12:00"
           },
+          // Instantly indexes Sunday as 0; send Monday-Friday only.
           days: {
             "0": false,
             "1": true,
             "2": true,
             "3": true,
-            "4": false,
-            "5": false,
+            "4": true,
+            "5": true,
             "6": false
           },
           // Instantly's timezone enum has no "America/New_York"; "America/Detroit" is the valid US Eastern value.
@@ -191,7 +192,8 @@ export function buildKintaCampaignPayload(input: {
     text_only: true,
     first_email_text_only: true,
     email_list: input.senderEmails,
-    // 400 leads/week target across 2 inboxes, sent only Tue-Thu (~3 sending days/week).
+    // 400 leads/week target across 2 inboxes; the window is Mon-Fri, so the weekly
+    // target is hit in ~3 sending days and this cap is the per-day ceiling, not a plan.
     // Do not raise past this until the winning Email 1 variant holds a reply rate above 3%
     // (then scale toward 10 inboxes / 2,000 per week).
     daily_limit: 135,

@@ -68,6 +68,20 @@ export interface InstantlyCampaign {
   timestamp_updated?: string;
 }
 
+export interface InstantlyCampaignDetail extends InstantlyCampaign {
+  campaign_schedule?: unknown;
+  daily_limit?: number | null;
+  daily_max_leads?: number | null;
+  email_gap?: number | null;
+  random_wait_max?: number | null;
+  sequences?: unknown;
+  text_only?: boolean | null;
+  first_email_text_only?: boolean | null;
+  stop_on_reply?: boolean | null;
+  allow_risky_contacts?: boolean | null;
+  disable_bounce_protect?: boolean | null;
+}
+
 export interface InstantlyCampaignPayload {
   name: string;
   campaign_schedule: {
@@ -146,7 +160,7 @@ export async function listInstantlyCampaigns(input: { search?: string; limit?: n
 }
 
 export async function getInstantlyCampaign(id: string) {
-  return instantlyFetch(`/api/v2/campaigns/${id}`) as Promise<InstantlyCampaign & { campaign_schedule?: unknown }>;
+  return instantlyFetch(`/api/v2/campaigns/${id}`) as Promise<InstantlyCampaignDetail>;
 }
 
 // ---------------------------------------------------------------------------
@@ -246,6 +260,19 @@ export interface InstantlyEmailSummary {
   raw?: unknown;
 }
 
+export interface InstantlyEmailRecord extends InstantlyEmailSummary {
+  listId?: string;
+  direction: "sent" | "received" | "manual";
+  step?: string;
+  variant?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  isUnread?: boolean;
+  isAutoReply?: boolean;
+  isFocused?: boolean;
+  emailStatus?: number;
+}
+
 function normalizeEmail(raw: unknown): InstantlyEmailSummary {
   const e = (raw ?? {}) as Record<string, unknown>;
   const body = (e.body ?? {}) as Record<string, unknown>;
@@ -270,6 +297,71 @@ function normalizeEmail(raw: unknown): InstantlyEmailSummary {
     preview: text ? normalizeWhitespace(text).slice(0, 280) : undefined,
     threadText: text ? normalizeWhitespace(text) : undefined,
     raw
+  };
+}
+
+export function normalizeEmailRecord(raw: unknown): InstantlyEmailRecord {
+  const e = (raw ?? {}) as Record<string, unknown>;
+  const body = (e.body ?? {}) as Record<string, unknown>;
+  const summary = normalizeEmail(raw);
+  const explicitType = typeof e.email_type === "string" ? e.email_type : undefined;
+  const ueType = typeof e.ue_type === "number" ? e.ue_type : undefined;
+  const direction =
+    explicitType === "received" || ueType === 2
+      ? "received"
+      : explicitType === "manual" || ueType === 3
+        ? "manual"
+        : "sent";
+
+  return {
+    ...summary,
+    listId: typeof e.list_id === "string" ? e.list_id : undefined,
+    direction,
+    step: typeof e.step === "string" ? e.step : undefined,
+    variant:
+      typeof e.variant === "string" || typeof e.variant === "number"
+        ? String(e.variant)
+        : undefined,
+    bodyText: typeof body.text === "string" ? body.text : undefined,
+    bodyHtml: typeof body.html === "string" ? body.html : undefined,
+    isUnread: typeof e.is_unread === "boolean" ? e.is_unread : e.is_unread === 1,
+    isAutoReply: typeof e.is_auto_reply === "boolean" ? e.is_auto_reply : e.is_auto_reply === 1,
+    isFocused: typeof e.is_focused === "boolean" ? e.is_focused : e.is_focused === 1,
+    emailStatus: typeof e.i_status === "number" ? e.i_status : undefined
+  };
+}
+
+/** Cursor-paginated workspace email ledger, including exact rendered bodies. */
+export async function listInstantlyEmailsPage(input: {
+  limit?: number;
+  startingAfter?: string;
+  minTimestampCreated?: string;
+  maxTimestampCreated?: string;
+  sortOrder?: "asc" | "desc";
+  campaignId?: string;
+  lead?: string;
+  eaccount?: string;
+  emailType?: "sent" | "received" | "manual";
+  scheduledOnly?: boolean;
+}) {
+  const response = (await instantlyFetch(
+    `/api/v2/emails${queryString({
+      limit: input.limit ?? 100,
+      starting_after: input.startingAfter,
+      min_timestamp_created: input.minTimestampCreated,
+      max_timestamp_created: input.maxTimestampCreated,
+      sort_order: input.sortOrder ?? "asc",
+      campaign_id: input.campaignId,
+      lead: input.lead,
+      eaccount: input.eaccount,
+      email_type: input.emailType,
+      scheduled_only: input.scheduledOnly
+    })}`
+  )) as { items?: unknown; next_starting_after?: string };
+  const items = Array.isArray(response.items) ? response.items : [];
+  return {
+    messages: items.map(normalizeEmailRecord),
+    nextStartingAfter: response.next_starting_after
   };
 }
 
@@ -422,13 +514,24 @@ export function interestStatusLabel(status?: number) {
 }
 
 export interface InstantlyLeadRecord extends InstantlyLeadEngagement {
+  id?: string;
+  campaignId?: string;
+  listId?: string;
   firstName?: string;
   lastName?: string;
   companyName?: string;
+  companyDomain?: string;
   jobTitle?: string;
   interestStatus?: number;
+  verificationStatus?: number;
+  createdAt?: string;
+  updatedAt?: string;
+  lastOpenAt?: string;
+  lastReplyAt?: string;
+  lastClickAt?: string;
   /** Custom fields carried from the CSV/Apollo import. */
   customFields: Record<string, string>;
+  raw?: Record<string, unknown>;
 }
 
 function toLeadRecord(raw: Record<string, unknown>, email: string): InstantlyLeadRecord {
@@ -441,6 +544,7 @@ function toLeadRecord(raw: Record<string, unknown>, email: string): InstantlyLea
     }
   }
   return {
+    id: typeof raw.id === "string" ? raw.id : undefined,
     email,
     openCount: typeof raw.email_open_count === "number" ? raw.email_open_count : 0,
     clickCount: typeof raw.email_click_count === "number" ? raw.email_click_count : 0,
@@ -449,12 +553,22 @@ function toLeadRecord(raw: Record<string, unknown>, email: string): InstantlyLea
     lastContactAt: typeof raw.timestamp_last_contact === "string" ? raw.timestamp_last_contact : undefined,
     lastStepId: typeof summary.lastStep?.stepID === "string" ? summary.lastStep.stepID : undefined,
     lastStepFrom: typeof summary.lastStep?.from === "string" ? summary.lastStep.from : undefined,
+    campaignId: typeof raw.campaign === "string" ? raw.campaign : undefined,
+    listId: typeof raw.list_id === "string" ? raw.list_id : undefined,
     firstName: typeof raw.first_name === "string" ? raw.first_name : undefined,
     lastName: typeof raw.last_name === "string" ? raw.last_name : undefined,
     companyName: typeof raw.company_name === "string" ? raw.company_name : undefined,
+    companyDomain: typeof raw.company_domain === "string" ? raw.company_domain : undefined,
     jobTitle: typeof raw.job_title === "string" ? raw.job_title : undefined,
     interestStatus: typeof raw.lt_interest_status === "number" ? raw.lt_interest_status : undefined,
-    customFields
+    verificationStatus: typeof raw.verification_status === "number" ? raw.verification_status : undefined,
+    createdAt: typeof raw.timestamp_created === "string" ? raw.timestamp_created : undefined,
+    updatedAt: typeof raw.timestamp_updated === "string" ? raw.timestamp_updated : undefined,
+    lastOpenAt: typeof raw.timestamp_last_open === "string" ? raw.timestamp_last_open : undefined,
+    lastReplyAt: typeof raw.timestamp_last_reply === "string" ? raw.timestamp_last_reply : undefined,
+    lastClickAt: typeof raw.timestamp_last_click === "string" ? raw.timestamp_last_click : undefined,
+    customFields,
+    raw
   };
 }
 
@@ -471,9 +585,26 @@ export async function getLeadRecord(input: { email: string; campaignId?: string 
 
 /** A page of full lead records for the CRM view (cursor-paginated, optional search). */
 export async function listLeadRecordsPage(input: { campaignId?: string; search?: string; limit?: number; startingAfter?: string }) {
+  return listInstantlyLeadsPage(input);
+}
+
+/** Cursor-paginated lead records without application-level caps. */
+export async function listInstantlyLeadsPage(input: {
+  campaignId?: string;
+  search?: string;
+  limit?: number;
+  startingAfter?: string;
+  distinctContacts?: boolean;
+}) {
   const response = (await instantlyFetch("/api/v2/leads/list", {
     method: "POST",
-    body: JSON.stringify({ campaign: input.campaignId, search: input.search, limit: input.limit ?? 100, starting_after: input.startingAfter })
+    body: JSON.stringify({
+      campaign: input.campaignId,
+      search: input.search,
+      limit: input.limit ?? 100,
+      starting_after: input.startingAfter,
+      distinct_contacts: input.distinctContacts
+    })
   })) as { items?: unknown; next_starting_after?: string };
   const items = Array.isArray(response.items) ? (response.items as Array<Record<string, unknown>>) : [];
   return {
@@ -565,10 +696,16 @@ export async function createInstantlyCampaign(payload: InstantlyCampaignPayload)
   }) as Promise<InstantlyCampaign>;
 }
 
-export async function patchInstantlyCampaign(id: string, payload: InstantlyCampaignPayload) {
+export async function patchInstantlyCampaign(id: string, payload: Partial<InstantlyCampaignPayload>) {
   return instantlyFetch(`/api/v2/campaigns/${id}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
+  }) as Promise<InstantlyCampaign>;
+}
+
+export async function activateInstantlyCampaign(id: string) {
+  return instantlyFetch(`/api/v2/campaigns/${id}/activate`, {
+    method: "POST"
   }) as Promise<InstantlyCampaign>;
 }
 
