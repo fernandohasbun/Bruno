@@ -13,7 +13,8 @@
     "worker": "tsx src/worker.ts",
     "instantly:create-kinta-campaign": "tsx src/tools/upsertKintaCampaign.ts",
     "instantly:deploy-personas": "tsx src/tools/deployPersonaCampaigns.ts",
-    "agent:chat": "tsx src/tools/chatWithOutboundAgent.ts"
+    "agent:chat": "tsx src/tools/chatWithOutboundAgent.ts",
+    "backfill:ooo": "tsx src/tools/backfillOutOfOffice.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.105.0",
