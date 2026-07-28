@@ -110,15 +110,34 @@ export interface AwayLeadRow {
   retarget_run_after: string | null;
 }
 
+/** An auto-reply this old is history, not something you are still waiting on. */
+const AWAY_MAX_AGE_DAYS = 60;
+
 /**
- * Leads whose most recent reply was an autoresponder, with any follow-up still
- * queued for them. Backs the Inbox "Away" section: without it an out_of_office
- * classification is invisible, and a scheduled retarget has no screen at all.
+ * Leads whose most recent reply was an autoresponder and who are still worth
+ * waiting on. Backs the Inbox "Away" section — without it an out_of_office
+ * classification is invisible and a scheduled retarget has no screen at all.
+ *
+ * A lead leaves this list three ways, and each needs its own guard:
+ *  - they come back and reply for real, so their newest classification is some
+ *    other intent (the latest CTE, rather than filtering to out_of_office first,
+ *    which would pin them here forever)
+ *  - their follow-up drafts, moving them to "Waiting on you" — note the retarget
+ *    writes another out_of_office row, so intent alone cannot tell them apart
+ *  - nothing happens for two months and the auto-reply ages out
  */
 export async function listAwayLeads(limit = 40): Promise<AwayLeadRow[]> {
   const result = await pool.query<AwayLeadRow>(
     `
-      SELECT DISTINCT ON (lower(rc.email))
+      WITH latest AS (
+        SELECT DISTINCT ON (lower(email))
+          email, company_name, intent, reason, created_at,
+          ooo_return_date, ooo_alternate_contact, raw_thread
+        FROM reply_classifications
+        WHERE email IS NOT NULL
+        ORDER BY lower(email), created_at DESC
+      )
+      SELECT
         rc.email,
         rc.company_name,
         rc.reason,
@@ -128,14 +147,20 @@ export async function listAwayLeads(limit = 40): Promise<AwayLeadRow[]> {
         rc.raw_thread,
         r.id AS retarget_id,
         r.run_after::text AS retarget_run_after
-      FROM reply_classifications rc
+      FROM latest rc
       LEFT JOIN scheduled_retargets r
         ON lower(r.email) = lower(rc.email) AND r.status = 'scheduled'
-      WHERE rc.intent = 'out_of_office' AND rc.email IS NOT NULL
-      ORDER BY lower(rc.email), rc.created_at DESC
+      WHERE rc.intent = 'out_of_office'
+        AND rc.created_at > now() - ($2 || ' days')::interval
+        AND NOT EXISTS (
+          SELECT 1
+          FROM drafts d
+          JOIN reply_classifications rc2 ON rc2.id = d.reply_classification_id
+          WHERE lower(rc2.email) = lower(rc.email) AND d.status = 'drafted'
+        )
       LIMIT $1
     `,
-    [limit]
+    [limit, AWAY_MAX_AGE_DAYS]
   );
   // Soonest return first; the dateless ones sit at the bottom.
   return result.rows.sort((a, b) => {
