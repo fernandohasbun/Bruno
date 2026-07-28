@@ -1,6 +1,7 @@
 // Page bodies for the console shell. Data models are assembled in routes.ts;
 // these functions only turn them into HTML (everything dynamic escaped).
 
+import type { CrmLeadView } from "../db/crm.js";
 import { leadStatusLabel } from "../integrations/instantly.js";
 import { escapeHtml, intentBadge, relativeTime, renderChatTurns, whoLabel, SEND_ICON, type ChatTurn } from "./ui.js";
 
@@ -389,6 +390,8 @@ export interface CrmRow {
   replies: number;
   lastContactAt?: string;
   tags: string;
+  brunoIntent?: string;
+  brunoReturnDate?: string;
 }
 
 export interface LeadsPageModel {
@@ -397,10 +400,14 @@ export interface LeadsPageModel {
   page: number;
   pageSize: number;
   search?: string;
-  view: "all" | "replied" | "interested" | "in-sequence" | "finished" | "suppressed";
+  view: CrmLeadView;
   summary: {
     total: number;
     uncontacted: number;
+    contacted: number;
+    noReply: number;
+    away: number;
+    needsRead: number;
     inSequence: number;
     replied: number;
     interested: number;
@@ -428,14 +435,29 @@ function renderPager(path: string, page: number, pageSize: number, total: number
   </nav>`;
 }
 
+/** Bruno's verdict for the roster, short enough for a table cell. */
+function brunoReadCell(row: CrmRow, now: Date) {
+  if (!row.brunoIntent) return `<span class="muted">—</span>`;
+  const badge = intentBadge(row.brunoIntent);
+  if (row.brunoIntent !== "out_of_office") return badge;
+  return `${badge}<div class="mono muted">${escapeHtml(returnLabel(row.brunoReturnDate, now))}</div>`;
+}
+
 export function renderLeadsPage(m: LeadsPageModel, now: Date) {
-  const tabs: Array<{ value: LeadsPageModel["view"]; label: string }> = [
-    { value: "all", label: "all" },
-    { value: "replied", label: "replied" },
-    { value: "interested", label: "interested" },
-    { value: "in-sequence", label: "in sequence" },
+  // Funnel order: who was imported, who we emailed, who stayed silent, then what
+  // came back. "in sequence" sits late because Instantly marks every imported
+  // lead active, so it counts the import list rather than anyone contacted.
+  const tabs: Array<{ value: LeadsPageModel["view"]; label: string; count?: number }> = [
+    { value: "all", label: "all", count: m.summary.total },
+    { value: "contacted", label: "contacted", count: m.summary.contacted },
+    { value: "no-reply", label: "no reply", count: m.summary.noReply },
+    { value: "away", label: "away", count: m.summary.away },
+    { value: "needs-read", label: "needs read", count: m.summary.needsRead },
+    { value: "replied", label: "replied", count: m.summary.replied },
+    { value: "interested", label: "interested", count: m.summary.interested },
+    { value: "in-sequence", label: "in sequence", count: m.summary.inSequence },
     { value: "finished", label: "finished" },
-    { value: "suppressed", label: "suppressed" }
+    { value: "suppressed", label: "suppressed", count: m.summary.suppressed }
   ];
   const table =
     m.rows.length === 0
@@ -443,7 +465,7 @@ export function renderLeadsPage(m: LeadsPageModel, now: Date) {
       : `
       <div class="table-scroll">
         <table id="crm-table">
-          <thead><tr><th>Lead</th><th>Persona</th><th>Pipeline</th><th>Sequence</th><th class="num">Opens</th><th class="num">Clicks</th><th class="num">Replies</th><th>Last contact</th></tr></thead>
+          <thead><tr><th>Lead</th><th>Persona</th><th>Bruno's read</th><th>Pipeline</th><th>Sequence</th><th class="num">Opens</th><th class="num">Clicks</th><th class="num">Replies</th><th>Last contact</th></tr></thead>
           <tbody>
             ${m.rows
               .map(
@@ -451,6 +473,7 @@ export function renderLeadsPage(m: LeadsPageModel, now: Date) {
                 <tr data-tags="${escapeHtml(row.tags)}" data-text="${escapeHtml(`${row.name ?? ""} ${row.company ?? ""} ${row.email} ${row.persona ?? ""} ${row.targetRole ?? ""}`.toLowerCase())}">
                   <td><a class="lead-link" href="/dashboard/lead?email=${encodeURIComponent(row.email)}"><strong>${escapeHtml(row.name || row.company || row.email)}</strong></a><div class="mono muted">${escapeHtml(row.email)}${row.company && row.name ? ` · ${escapeHtml(row.company)}` : ""}</div></td>
                   <td>${row.persona ? `<span class="badge" style="background:rgba(99,102,241,0.15);color:#a5b4fc">${escapeHtml(row.persona)}</span>${row.targetRole ? `<div class="mono muted">${escapeHtml(row.targetRole)}</div>` : ""}` : `<span class="muted">—</span>`}</td>
+                  <td>${brunoReadCell(row, now)}</td>
                   <td>${row.interestLabel ? `<span class="badge" style="background:rgba(52,211,116,0.13);color:#4ade80">${escapeHtml(row.interestLabel)}</span>` : `<span class="muted">—</span>`}</td>
                   <td class="mono">${escapeHtml(row.sequenceLabel ?? "—")}</td>
                   <td class="mono num">${row.opens}</td>
@@ -473,7 +496,14 @@ export function renderLeadsPage(m: LeadsPageModel, now: Date) {
       <div class="crm-stat"><strong>${m.summary.interested.toLocaleString("en-US")}</strong><span>interested</span></div>
     </section>
     <form class="crm-bar" action="/dashboard/leads" method="get">
-      ${tabs.map((tab) => `<a class="crm-tab${m.view === tab.value ? " sel" : ""}" style="text-decoration:none" href="${escapeHtml(pageHref("/dashboard/leads", { view: tab.value, q: m.search }))}">${tab.label}</a>`).join("")}
+      ${tabs
+        .map(
+          (tab) =>
+            `<a class="crm-tab${m.view === tab.value ? " sel" : ""}" style="text-decoration:none" href="${escapeHtml(pageHref("/dashboard/leads", { view: tab.value, q: m.search }))}">${tab.label}${
+              tab.count === undefined ? "" : ` <span class="mono muted">${tab.count}</span>`
+            }</a>`
+        )
+        .join("")}
       <input class="crm-search" name="q" type="search" value="${escapeHtml(m.search ?? "")}" placeholder="search the complete CRM…" />
       ${m.view !== "all" ? `<input type="hidden" name="view" value="${escapeHtml(m.view)}" />` : ""}
       <button class="btn btn-plain" type="submit">Search</button>

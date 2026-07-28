@@ -6,6 +6,7 @@ import {
   KINTA_PERSONA_CAMPAIGNS,
   findKintaPersonaByCampaignName
 } from "../src/campaigns/kintaPersonaCampaigns.js";
+import { CRM_LEAD_VIEWS } from "../src/db/crm.js";
 import { retargetRunAfter } from "../src/db/retargets.js";
 import { normalizeInstantlyEvent } from "../src/webhooks/normalizeInstantlyEvent.js";
 import { inboxSection, isReplyIntent } from "../src/dashboard/routes.js";
@@ -125,6 +126,25 @@ test("non-OOO intents never carry absence detail", () => {
 
 test("the retarget lands mid-morning on the return date, not at midnight", () => {
   assert.equal(retargetRunAfter("2026-07-30").toISOString(), "2026-07-30T14:00:00.000Z");
+});
+
+test("the roster separates contacted from merely imported", () => {
+  // Instantly marks every imported lead status 1, so "in sequence" counts the
+  // import list, not anyone emailed — 499 vs 23 on P2 Legal. Only last_contact_at
+  // records an actual send, so the two views must not share a predicate.
+  const sql = readFileSync(new URL("../src/db/crm.ts", import.meta.url), "utf8");
+  const query = sql.slice(sql.indexOf("export async function listCrmLeadsPage"));
+
+  assert.match(query, /'contacted' AND l\.last_contact_at IS NOT NULL/);
+  assert.match(query, /'in-sequence' AND l\.status IN \(1, 2\)/);
+  assert.match(query, /'no-reply'[\s\S]*?l\.email_reply_count = 0/);
+
+  // Bruno's read comes from the newest classification, not an arbitrary one.
+  assert.match(query, /LEFT JOIN LATERAL[\s\S]*?ORDER BY rc\.created_at DESC[\s\S]*?LIMIT 1/);
+
+  for (const view of ["all", "contacted", "no-reply", "away", "needs-read"]) {
+    assert.ok(CRM_LEAD_VIEWS.includes(view as never), `roster view missing: ${view}`);
+  }
 });
 
 test("the away list is documented to clear three ways", () => {
