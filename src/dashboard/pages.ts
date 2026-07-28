@@ -475,7 +475,7 @@ export function renderLeadsPage(m: LeadsPageModel, now: Date) {
       : `
       <div class="table-scroll">
         <table id="crm-table">
-          <thead><tr><th>Lead</th><th>Persona</th><th>Bruno's read</th><th>Pipeline</th><th>Sequence</th><th class="num">Opens</th><th class="num">Clicks</th><th class="num">Replies</th><th>Last contact</th></tr></thead>
+          <thead><tr><th>Lead</th><th>Persona</th><th>Bruno's read</th><th>Sequence</th><th class="num">Opens</th><th class="num">Clicks</th><th class="num">Replies</th><th>Last contact</th></tr></thead>
           <tbody>
             ${m.rows
               .map(
@@ -484,7 +484,6 @@ export function renderLeadsPage(m: LeadsPageModel, now: Date) {
                   <td><a class="lead-link" href="/dashboard/lead?email=${encodeURIComponent(row.email)}"><strong>${escapeHtml(row.name || row.company || row.email)}</strong></a><div class="mono muted">${escapeHtml(row.email)}${row.company && row.name ? ` · ${escapeHtml(row.company)}` : ""}</div></td>
                   <td>${row.persona ? `<span class="badge" style="background:rgba(99,102,241,0.15);color:#a5b4fc">${escapeHtml(row.persona)}</span>${row.targetRole ? `<div class="mono muted">${escapeHtml(row.targetRole)}</div>` : ""}` : `<span class="muted">—</span>`}</td>
                   <td>${brunoReadCell(row, now)}</td>
-                  <td>${row.interestLabel ? `<span class="badge" style="background:rgba(52,211,116,0.13);color:#4ade80">${escapeHtml(row.interestLabel)}</span>` : `<span class="muted">—</span>`}</td>
                   <td class="mono">${escapeHtml(row.sequenceLabel ?? "—")}</td>
                   <td class="mono num">${row.opens}</td>
                   <td class="mono num">${row.clicks}</td>

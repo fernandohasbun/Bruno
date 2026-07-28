@@ -11,6 +11,7 @@ import { retargetRunAfter } from "../src/db/retargets.js";
 import { normalizeInstantlyEvent } from "../src/webhooks/normalizeInstantlyEvent.js";
 import { intentBadge } from "../src/dashboard/ui.js";
 import { renderLeadsPage } from "../src/dashboard/pages.js";
+import { interestValueForIntent, isHumanAdvancedInterest } from "../src/integrations/instantly.js";
 import { inboxSection, isReplyIntent } from "../src/dashboard/routes.js";
 import type { ReplyClassification, ReplyIntent } from "../src/types/domain.js";
 
@@ -150,6 +151,36 @@ test("a return label always carries its calendar date", () => {
   // A date in another year must say so, since a return can cross December.
   assert.match(label("2027-01-04"), /back Mon · 1\/4\/27/);
   assert.match(label(undefined), /no date given/);
+});
+
+test("Bruno's verdict overrides Instantly's reply-means-interested guess", () => {
+  // Live evidence: an autoresponder listing scheduling contacts, and a refusal
+  // citing CJIS compliance rules, were both stored by Instantly as "interested"
+  // because a reply arrived. Bruno read both correctly.
+  assert.equal(interestValueForIntent("out_of_office"), 0);
+  assert.equal(interestValueForIntent("negative"), -1);
+  assert.equal(interestValueForIntent("unsubscribe"), -1);
+  assert.equal(interestValueForIntent("positive"), 1);
+
+  // Still-live conversations have no Instantly code that fits, so leave them be
+  // rather than forcing them into "interested" or "not interested".
+  assert.equal(interestValueForIntent("question"), undefined);
+  assert.equal(interestValueForIntent("objection"), undefined);
+  assert.equal(interestValueForIntent("not_now"), undefined);
+  assert.equal(interestValueForIntent("unclear"), undefined);
+});
+
+test("a human's pipeline advance is never walked back", () => {
+  // 2 meeting booked · 3 meeting completed · 4 closed — all human decisions
+  // further down the funnel than anything Bruno can read off a reply.
+  assert.equal(isHumanAdvancedInterest(2), true);
+  assert.equal(isHumanAdvancedInterest(3), true);
+  assert.equal(isHumanAdvancedInterest(4), true);
+
+  assert.equal(isHumanAdvancedInterest(1), false);
+  assert.equal(isHumanAdvancedInterest(0), false);
+  assert.equal(isHumanAdvancedInterest(-1), false);
+  assert.equal(isHumanAdvancedInterest(undefined), false);
 });
 
 test("intent badges spell out every underscore", () => {
