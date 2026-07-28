@@ -1,5 +1,15 @@
 import { pool } from "./pool.js";
 
+/** True once a contact has bounced, unsubscribed, or been marked negative. */
+export async function isSuppressed(email?: string) {
+  if (!email) return false;
+  const result = await pool.query<{ exists: boolean }>(
+    "SELECT EXISTS (SELECT 1 FROM suppression_events WHERE lower(email) = lower($1)) AS exists",
+    [email]
+  );
+  return result.rows[0]?.exists ?? false;
+}
+
 export async function saveSuppression(input: {
   email?: string;
   provider?: string;

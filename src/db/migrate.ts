@@ -7,7 +7,9 @@ const migrationFiles = [
   "002_agent_conversations.sql",
   "003_phase_a_ops.sql",
   "004_approval_finals.sql",
-  "005_persona_metrics.sql"
+  "005_persona_metrics.sql",
+  "006_visibility_learning_control.sql",
+  "007_out_of_office_retargets.sql"
 ];
 
 async function migrate() {

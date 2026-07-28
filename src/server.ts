@@ -4,7 +4,7 @@ import pino from "pino";
 import { env } from "./config/env.js";
 import { registerDashboard } from "./dashboard/routes.js";
 import { closePool } from "./db/pool.js";
-import { enqueueJob } from "./queue/queue.js";
+import { enqueueJob, enqueueJobIfIdle } from "./queue/queue.js";
 import { startWorkerLoop } from "./queue/worker.js";
 import { registerInstantlyWebhook } from "./webhooks/instantly.js";
 import { registerSlackWebhook } from "./webhooks/slack.js";
@@ -42,6 +42,25 @@ cron.schedule("*/5 * * * *", async () => {
   await enqueueJob("reply.poll", { scheduledAt: new Date().toISOString() });
 });
 
+// Hourly sweep for out-of-office windows that have closed. The retarget rows
+// carry their own run_after, so the sweep only has to run often enough to catch
+// them on the right morning.
+cron.schedule("10 * * * *", async () => {
+  await enqueueJobIfIdle("reply.retarget", { scheduledAt: new Date().toISOString() });
+});
+
+cron.schedule("*/2 * * * *", async () => {
+  await enqueueJobIfIdle("crm.messages.sync", { scheduledAt: new Date().toISOString() });
+});
+
+cron.schedule("*/15 * * * *", async () => {
+  await enqueueJobIfIdle("crm.leads.sync", { scheduledAt: new Date().toISOString() });
+});
+
+cron.schedule("20 * * * *", async () => {
+  await enqueueJobIfIdle("crm.reconcile", { scheduledAt: new Date().toISOString() });
+});
+
 cron.schedule("*/15 * * * *", async () => {
   await enqueueJob("watchdog.check", { scheduledAt: new Date().toISOString() });
 });
@@ -57,6 +76,16 @@ cron.schedule("0 8 * * 1-5", async () => {
 cron.schedule("0 9 * * 1", async () => {
   await enqueueJob("weekly.analytics", { scheduledAt: new Date().toISOString() });
 });
+
+cron.schedule("15 9 * * 1", async () => {
+  await enqueueJob("learning.review", { scheduledAt: new Date().toISOString() });
+});
+
+// Seed the read model immediately after a deployment; every job is idempotent.
+await Promise.all([
+  enqueueJobIfIdle("crm.leads.sync", { scheduledAt: new Date().toISOString(), trigger: "startup" }),
+  enqueueJobIfIdle("crm.messages.sync", { scheduledAt: new Date().toISOString(), trigger: "startup" })
+]);
 
 const worker = startWorkerLoop();
 
