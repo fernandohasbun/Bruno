@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { heuristicClassifyReply, normalizeOutOfOffice } from "../src/agents/replyIntentAgent.js";
 import {
@@ -124,6 +125,26 @@ test("non-OOO intents never carry absence detail", () => {
 
 test("the retarget lands mid-morning on the return date, not at midnight", () => {
   assert.equal(retargetRunAfter("2026-07-30").toISOString(), "2026-07-30T14:00:00.000Z");
+});
+
+test("the away list is documented to clear three ways", () => {
+  // Regression guard for a query that filtered to out_of_office before picking
+  // the latest row per lead, so nobody ever left the section: a lead who later
+  // replied for real stayed listed forever, alongside their own hot draft.
+  const sql = readFileSync(new URL("../src/db/retargets.ts", import.meta.url), "utf8");
+  const query = sql.slice(sql.indexOf("export async function listAwayLeads"));
+
+  // The latest row per lead must be chosen before intent is filtered.
+  const latestCte = query.indexOf("WITH latest AS");
+  const intentFilter = query.indexOf("rc.intent = 'out_of_office'");
+  assert.ok(latestCte !== -1, "away query must resolve the latest classification per lead first");
+  assert.ok(intentFilter > latestCte, "intent must be filtered after the latest row is picked, not before");
+
+  // A pending draft means they moved to "Waiting on you" — they cannot be in both.
+  assert.ok(/NOT EXISTS[\s\S]*d\.status = 'drafted'/.test(query), "away query must exclude leads with a pending draft");
+
+  // And stale auto-replies age out rather than accumulating forever.
+  assert.ok(/created_at > now\(\) - /.test(query), "away query must bound how old an auto-reply can be");
 });
 
 test("live campaign names still resolve to a persona", () => {
