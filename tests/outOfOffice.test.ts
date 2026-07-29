@@ -210,6 +210,20 @@ test("the roster separates contacted from merely imported", () => {
   }
 });
 
+test("the activity ledger joins each message to its own classification", () => {
+  // Matching on lead + nearest timestamp would guess for anyone who replied more
+  // than once. reply.poll stores the Instantly email id as the event's
+  // provider_event_id, and crm_messages keys on the same id, so the join is exact.
+  const sql = readFileSync(new URL("../src/db/crm.ts", import.meta.url), "utf8");
+  const query = sql.slice(sql.indexOf("export async function listCrmMessagesPage"));
+
+  assert.match(query, /e\.provider_event_id = m\.provider_email_id/);
+  assert.ok(!/timestamp_email[^)]*BETWEEN/.test(query), "must not fall back to timestamp-window matching");
+
+  // The filter has to run on the joined verdict, not on message text.
+  assert.match(query, /bruno\.intent = \$8/);
+});
+
 test("the away list is documented to clear three ways", () => {
   // Regression guard for a query that filtered to out_of_office before picking
   // the latest row per lead, so nobody ever left the section: a lead who later

@@ -70,6 +70,7 @@ export interface CrmMessagePageInput {
   direction?: "sent" | "received" | "manual";
   from?: string;
   to?: string;
+  intent?: string;
 }
 
 export interface CrmMessageRow {
@@ -90,6 +91,11 @@ export interface CrmMessageRow {
   provider_created_at: string | null;
   timestamp_email: string | null;
   synced_at: string;
+  /** Bruno's verdict on this exact message — null on anything he never read. */
+  bruno_intent: string | null;
+  bruno_reason: string | null;
+  bruno_confidence: number | null;
+  bruno_return_date: Date | null;
 }
 
 function isoOrNull(value?: string) {
@@ -445,20 +451,38 @@ export async function listCrmMessagesPage(input: CrmMessagePageInput = {}) {
   const search = input.search?.trim() || null;
   const result = await pool.query<CrmMessageRow & { total_count: string }>(
     `
-      SELECT *, count(*) OVER()::text AS total_count
-      FROM crm_messages
+      SELECT m.*,
+             bruno.intent           AS bruno_intent,
+             bruno.reason           AS bruno_reason,
+             bruno.confidence::float AS bruno_confidence,
+             bruno.ooo_return_date  AS bruno_return_date,
+             count(*) OVER()::text  AS total_count
+      FROM crm_messages m
+      -- Exact, not fuzzy. reply.poll stores the Instantly email id as the event's
+      -- provider_event_id, and crm_messages keys on that same id — so a message
+      -- resolves the one classification it produced, even for a lead who replied
+      -- several times. Indexed by events' UNIQUE (provider, provider_event_id).
+      LEFT JOIN LATERAL (
+        SELECT rc.intent, rc.reason, rc.confidence, rc.ooo_return_date
+        FROM events e
+        JOIN reply_classifications rc ON rc.event_id = e.id
+        WHERE e.provider = 'instantly' AND e.provider_event_id = m.provider_email_id
+        ORDER BY rc.created_at DESC
+        LIMIT 1
+      ) bruno ON true
       WHERE ($1::text IS NULL OR
-        coalesce(lead_email, '') ILIKE '%' || $1 || '%' OR
-        coalesce(subject, '') ILIKE '%' || $1 || '%' OR
-        coalesce(body_text, '') ILIKE '%' || $1 || '%')
-        AND ($2::text IS NULL OR campaign_id = $2)
-        AND ($3::text IS NULL OR lower(lead_email) = lower($3))
-        AND ($4::text IS NULL OR eaccount = $4)
-        AND ($5::text IS NULL OR direction = $5)
-        AND ($6::timestamptz IS NULL OR coalesce(timestamp_email, provider_created_at) >= $6)
-        AND ($7::timestamptz IS NULL OR coalesce(timestamp_email, provider_created_at) <= $7)
-      ORDER BY coalesce(timestamp_email, provider_created_at) DESC, provider_email_id DESC
-      LIMIT $8 OFFSET $9
+        coalesce(m.lead_email, '') ILIKE '%' || $1 || '%' OR
+        coalesce(m.subject, '') ILIKE '%' || $1 || '%' OR
+        coalesce(m.body_text, '') ILIKE '%' || $1 || '%')
+        AND ($2::text IS NULL OR m.campaign_id = $2)
+        AND ($3::text IS NULL OR lower(m.lead_email) = lower($3))
+        AND ($4::text IS NULL OR m.eaccount = $4)
+        AND ($5::text IS NULL OR m.direction = $5)
+        AND ($6::timestamptz IS NULL OR coalesce(m.timestamp_email, m.provider_created_at) >= $6)
+        AND ($7::timestamptz IS NULL OR coalesce(m.timestamp_email, m.provider_created_at) <= $7)
+        AND ($8::text IS NULL OR bruno.intent = $8)
+      ORDER BY coalesce(m.timestamp_email, m.provider_created_at) DESC, m.provider_email_id DESC
+      LIMIT $9 OFFSET $10
     `,
     [
       search,
@@ -468,6 +492,7 @@ export async function listCrmMessagesPage(input: CrmMessagePageInput = {}) {
       input.direction ?? null,
       input.from ? isoOrNull(input.from) : null,
       input.to ? isoOrNull(input.to) : null,
+      input.intent ?? null,
       pageSize,
       (page - 1) * pageSize
     ]
@@ -481,7 +506,7 @@ export async function listCrmMessagesPage(input: CrmMessagePageInput = {}) {
 }
 
 export async function getCrmMessageSummary() {
-  const [totals, senders] = await Promise.all([
+  const [totals, senders, intents] = await Promise.all([
     pool.query<{ total: string; sent: string; received: string; manual: string; leads: string }>(
       `
         SELECT
@@ -501,6 +526,19 @@ export async function getCrmMessageSummary() {
         GROUP BY eaccount
         ORDER BY count(*) DESC, eaccount
       `
+    ),
+    // Only intents actually present get offered as filters — a dropdown listing
+    // every possible intent mostly promises empty result sets.
+    pool.query<{ intent: string; count: string }>(
+      `
+        SELECT rc.intent, count(*)::text AS count
+        FROM crm_messages m
+        JOIN events e
+          ON e.provider = 'instantly' AND e.provider_event_id = m.provider_email_id
+        JOIN reply_classifications rc ON rc.event_id = e.id
+        GROUP BY rc.intent
+        ORDER BY count(*) DESC, rc.intent
+      `
     )
   ]);
   const row = totals.rows[0] ?? { total: "0", sent: "0", received: "0", manual: "0", leads: "0" };
@@ -510,7 +548,8 @@ export async function getCrmMessageSummary() {
     received: Number(row.received),
     manual: Number(row.manual),
     leads: Number(row.leads),
-    senders: senders.rows.map((item) => ({ email: item.eaccount, messages: Number(item.count) }))
+    senders: senders.rows.map((item) => ({ email: item.eaccount, messages: Number(item.count) })),
+    intents: intents.rows.map((item) => ({ intent: item.intent, messages: Number(item.count) }))
   };
 }
 

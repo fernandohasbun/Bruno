@@ -535,6 +535,9 @@ export interface ActivityMessage {
   subject?: string;
   preview?: string;
   bodyText?: string;
+  brunoIntent?: string;
+  brunoReason?: string;
+  brunoReturnDate?: string;
 }
 
 export interface ActivityPageModel {
@@ -547,7 +550,16 @@ export interface ActivityPageModel {
   sender?: string;
   from?: string;
   to?: string;
-  summary: { total: number; sent: number; received: number; manual: number; leads: number; senders: string[] };
+  intent?: string;
+  summary: {
+    total: number;
+    sent: number;
+    received: number;
+    manual: number;
+    leads: number;
+    senders: string[];
+    intents: Array<{ intent: string; messages: number }>;
+  };
   syncLabel?: string;
 }
 
@@ -557,7 +569,7 @@ export function renderActivityPage(m: ActivityPageModel, now: Date) {
       ? `<div class="empty"><p>No messages match these filters. The ledger fills automatically from Instantly.</p></div>`
       : `<div class="table-scroll">
           <table>
-            <thead><tr><th>Direction</th><th>Lead</th><th>Subject / exact content</th><th>Sender</th><th>Sequence</th><th>When</th></tr></thead>
+            <thead><tr><th>Direction</th><th>Lead</th><th>Subject / exact content</th><th>Bruno's read</th><th>Sender</th><th>Sequence</th><th>When</th></tr></thead>
             <tbody>
               ${m.messages
                 .map((message, index) => {
@@ -569,13 +581,27 @@ export function renderActivityPage(m: ActivityPageModel, now: Date) {
                       <strong>${escapeHtml(message.subject || "(no subject)")}</strong>
                       <div class="ledger-preview">${escapeHtml((message.preview || message.bodyText || "").slice(0, 180))}</div>
                     </td>
+                    <td>${
+                      message.brunoIntent
+                        ? `${intentBadge(message.brunoIntent)}${
+                            message.brunoIntent === "out_of_office"
+                              ? `<div class="mono muted">${escapeHtml(returnLabel(message.brunoReturnDate, now))}</div>`
+                              : ""
+                          }`
+                        : `<span class="muted">—</span>`
+                    }</td>
                     <td class="mono">${escapeHtml(message.sender ?? "—")}</td>
                     <td><span class="mono">${message.step ? `step ${escapeHtml(message.step)}` : "—"}${message.variant ? ` · ${escapeHtml(message.variant)}` : ""}</span>${message.campaignName ? `<div class="muted">${escapeHtml(message.campaignName)}</div>` : ""}</td>
                     <td class="mono">${message.at ? relativeTime(message.at, now) : "—"}</td>
                   </tr>
                   <tr class="ledger-detail" data-ledger-detail="${escapeHtml(key)}" hidden>
-                    <td colspan="6">
+                    <td colspan="7">
                       <div class="ledger-message">${escapeHtml(message.bodyText || message.preview || "(message body unavailable)")}</div>
+                      ${
+                        message.brunoReason
+                          ? `<div class="agent-note" style="margin-top:8px"><span class="section-label">Bruno's read</span> ${escapeHtml(message.brunoReason)}</div>`
+                          : ""
+                      }
                     </td>
                   </tr>`;
                 })
@@ -597,6 +623,17 @@ export function renderActivityPage(m: ActivityPageModel, now: Date) {
         <option value="">all directions</option>
         ${(["sent", "received", "manual"] as const).map((value) => `<option value="${value}"${m.direction === value ? " selected" : ""}>${value}</option>`).join("")}
       </select>
+      <select class="crm-select" name="intent" title="What Bruno concluded">
+        <option value="">any read</option>
+        ${m.summary.intents
+          .map(
+            (item) =>
+              `<option value="${escapeHtml(item.intent)}"${m.intent === item.intent ? " selected" : ""}>${escapeHtml(
+                item.intent.replaceAll("_", " ")
+              )} (${item.messages})</option>`
+          )
+          .join("")}
+      </select>
       <select class="crm-select" name="sender">
         <option value="">all senders</option>
         ${m.summary.senders.map((sender) => `<option value="${escapeHtml(sender)}"${m.sender === sender ? " selected" : ""}>${escapeHtml(sender)}</option>`).join("")}
@@ -612,7 +649,8 @@ export function renderActivityPage(m: ActivityPageModel, now: Date) {
       direction: m.direction,
       sender: m.sender,
       from: m.from,
-      to: m.to
+      to: m.to,
+      intent: m.intent
     })}
   </main>`;
 }

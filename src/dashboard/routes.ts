@@ -1049,6 +1049,8 @@ export async function registerDashboard(app: FastifyInstance) {
     const sender = typeof query.sender === "string" && query.sender.includes("@") ? query.sender : undefined;
     const from = typeof query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : undefined;
     const to = typeof query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.to) ? query.to : undefined;
+    // Validated against the intent set so the filter can only ever be one of Bruno's.
+    const intent = typeof query.intent === "string" && isReplyIntent(query.intent) ? query.intent : undefined;
     const [shell, result, summary, checkpoints, campaignsResult] = await Promise.all([
       loadShellContext("activity", "Message activity", true),
       listCrmMessagesPage({
@@ -1058,7 +1060,8 @@ export async function registerDashboard(app: FastifyInstance) {
         direction,
         eaccount: sender,
         from: from ? `${from}T00:00:00-06:00` : undefined,
-        to: to ? `${to}T23:59:59.999-06:00` : undefined
+        to: to ? `${to}T23:59:59.999-06:00` : undefined,
+        intent
       }),
       getCrmMessageSummary(),
       listSyncCheckpoints(),
@@ -1082,7 +1085,12 @@ export async function registerDashboard(app: FastifyInstance) {
               variant: message.variant ?? undefined,
               subject: message.subject ?? undefined,
               preview: message.content_preview ?? undefined,
-              bodyText: message.body_text ?? undefined
+              bodyText: message.body_text ?? undefined,
+              brunoIntent: message.bruno_intent ?? undefined,
+              brunoReason: message.bruno_reason ?? undefined,
+              brunoReturnDate: message.bruno_return_date
+                ? message.bruno_return_date.toISOString().slice(0, 10)
+                : undefined
             })),
             total: result.total,
             page: result.page,
@@ -1092,13 +1100,15 @@ export async function registerDashboard(app: FastifyInstance) {
             sender,
             from,
             to,
+            intent,
             summary: {
               total: summary.total,
               sent: summary.sent,
               received: summary.received,
               manual: summary.manual,
               leads: summary.leads,
-              senders: summary.senders.map((item) => item.email)
+              senders: summary.senders.map((item) => item.email),
+              intents: summary.intents
             },
             syncLabel: messageSync?.cursor
               ? `backfill running · ${messageSync.records_synced.toLocaleString("en-US")} imported`
