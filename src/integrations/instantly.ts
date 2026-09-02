@@ -2,6 +2,17 @@ import { env } from "../config/env.js";
 
 const INSTANTLY_BASE_URL = "https://api.instantly.ai";
 
+const RATE_LIMIT_MAX_ATTEMPTS = 5;
+const RATE_LIMIT_BASE_DELAY_MS = 2_000;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Instantly caps at 20 requests/minute workspace-wide. A scheduled sync job
+// competing with manual/bulk usage will hit this regularly, and previously a
+// single 429 failed the entire sync with no retry. Back off and retry instead
+// of surfacing a transient rate limit as a hard failure.
 async function instantlyFetch(path: string, init?: RequestInit) {
   if (!env.INSTANTLY_API_KEY) {
     throw new Error("INSTANTLY_API_KEY is not configured");
@@ -13,16 +24,30 @@ async function instantlyFetch(path: string, init?: RequestInit) {
     headers.set("content-type", "application/json");
   }
 
-  const response = await fetch(`${INSTANTLY_BASE_URL}${path}`, {
-    ...init,
-    headers
-  });
+  for (let attempt = 1; attempt <= RATE_LIMIT_MAX_ATTEMPTS; attempt++) {
+    const response = await fetch(`${INSTANTLY_BASE_URL}${path}`, {
+      ...init,
+      headers
+    });
 
-  if (!response.ok) {
-    throw new Error(`Instantly API failed: ${response.status} ${await response.text()}`);
+    if (response.status === 429 && attempt < RATE_LIMIT_MAX_ATTEMPTS) {
+      const retryAfterHeader = Number(response.headers.get("retry-after"));
+      const delayMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
+        ? retryAfterHeader * 1000
+        : RATE_LIMIT_BASE_DELAY_MS * 2 ** (attempt - 1) + Math.random() * 500;
+      await response.text().catch(() => undefined);
+      await sleep(delayMs);
+      continue;
+    }
+
+    if (!response.ok) {
+      throw new Error(`Instantly API failed: ${response.status} ${await response.text()}`);
+    }
+
+    return response.json() as Promise<unknown>;
   }
 
-  return response.json() as Promise<unknown>;
+  throw new Error("Instantly API failed: exhausted retries after repeated 429 rate limiting");
 }
 
 function queryString(params: Record<string, string | number | boolean | undefined>) {
