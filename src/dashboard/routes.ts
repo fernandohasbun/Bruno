@@ -400,6 +400,7 @@ export interface CampaignPulse {
     openTracking?: boolean;
     linkTracking?: boolean | null;
     clicks: number;
+    totalLeads?: number;
   }>;
   inboxes: Array<{ email: string; todaySent?: number; last7Sent: number; landingRate: number }>;
 }
@@ -430,7 +431,13 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
         getLeadCohortStartDate()
       ]);
       if (campaigns.length === 0) return null;
-      const personaCampaigns = campaigns.filter((campaign) => campaign.name.startsWith("Kinta | P"));
+      // Exact membership in the canonical list, not a name prefix — "Kinta | P1 EA
+      // | MSFT hold | 2026-08" also starts with "Kinta | P" and would otherwise
+      // leak zero-rows for the held-out Microsoft leads into every pulse-derived
+      // view (KPIs, persona performance, Bruno's brief).
+      const personaCampaigns = campaigns.filter((campaign) =>
+        KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
+      );
       const selected = personaCampaigns.length > 0 ? personaCampaigns : [campaigns[0]];
 
       // Today's date in the campaigns' own sending timezone, not server/UTC —
@@ -502,7 +509,8 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
           bounces: item.bounced_count,
           openTracking: detail.open_tracking,
           linkTracking: detail.link_tracking,
-          clicks: item.link_click_count_unique ?? item.link_click_count
+          clicks: item.link_click_count_unique ?? item.link_click_count,
+          totalLeads: leadSyncComplete ? countsByCampaign.get(snapshot.campaign.id) : undefined
         }];
       });
 

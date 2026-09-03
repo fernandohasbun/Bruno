@@ -50,6 +50,7 @@ export interface PulseView {
     openTracking?: boolean;
     linkTracking?: boolean | null;
     clicks: number;
+    totalLeads?: number;
   }>;
   inboxes: Array<{ email: string; todaySent?: number; last7Sent: number; landingRate: number }>;
 }
@@ -1109,9 +1110,13 @@ function renderPersonaPerformance(m: CampaignModel) {
     const clickRate = row.linkTracking
       ? formatPercent(row.clicks, row.sent)
       : "off";
+    const contactedPct = row.totalLeads !== undefined ? formatPercent(row.contacted, row.totalLeads) : "—";
+    const remaining = row.totalLeads !== undefined ? Math.max(0, row.totalLeads - row.contacted) : undefined;
     return `<tr>
       <td><strong>${escapeHtml(row.persona)}</strong></td>
-      <td class="mono num">${row.contacted}</td>
+      <td class="mono num">${row.contacted}${row.totalLeads !== undefined ? ` / ${row.totalLeads}` : ""}</td>
+      <td class="mono num">${contactedPct}</td>
+      <td class="mono num">${remaining ?? "—"}</td>
       <td class="mono num">${row.sent}</td>
       <td class="mono num">${row.repliesUnique} · ${formatPercent(row.repliesUnique, row.contacted)}</td>
       <td class="mono num">${row.positiveReplies ?? "—"}</td>
@@ -1123,10 +1128,10 @@ function renderPersonaPerformance(m: CampaignModel) {
     </tr>`;
   }).join("\n");
   return `
-    <h2>Persona performance · lifetime</h2>
+    <h2>Persona performance${m.pulse.cohortStartDate ? ` · since ${m.pulse.cohortStartDate}` : ""}</h2>
     <p class="muted">Reply and conversion rates use contacted leads. Profit is actual revenue minus direct cost; it is never inferred from pipeline value.</p>
     <div class="table-scroll"><table>
-      <thead><tr><th>Persona</th><th class="num">Contacted</th><th class="num">Sent</th><th class="num">Replies · rate</th><th class="num">Positive</th><th class="num">Meetings</th><th class="num">Opps</th><th class="num">Closed</th><th class="num">CTR</th><th class="num">Gross profit</th></tr></thead>
+      <thead><tr><th>Persona</th><th class="num">Contacted / total</th><th class="num">% contacted</th><th class="num">Not yet contacted</th><th class="num">Sent</th><th class="num">Replies · rate</th><th class="num">Positive</th><th class="num">Meetings</th><th class="num">Opps</th><th class="num">Closed</th><th class="num">CTR</th><th class="num">Gross profit</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
 }
