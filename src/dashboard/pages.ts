@@ -553,7 +553,8 @@ export interface ActivityPageModel {
   from?: string;
   to?: string;
   intent?: string;
-  showingLast7Days?: boolean;
+  showingSincePurge?: boolean;
+  cohortStartDate?: string;
   summary: {
     total: number;
     sent: number;
@@ -613,10 +614,10 @@ export function renderActivityPage(m: ActivityPageModel, now: Date) {
           </table>
         </div>`;
 
-  const rangeNote = m.showingLast7Days
-    ? `<p class="muted mono" style="margin:0 0 10px">showing the last 7 days — older history isn't deleted, just hidden here. <a href="/dashboard/activity?all=1">show all history →</a></p>`
+  const rangeNote = m.showingSincePurge
+    ? `<p class="muted mono" style="margin:0 0 10px">showing since ${m.cohortStartDate ?? "the last lead reset"} (current lead cohort's start) — older history isn't deleted, just hidden here. <a href="/dashboard/activity?all=1">show all history →</a></p>`
     : m.from || m.to
-      ? `<p class="muted mono" style="margin:0 0 10px">filtered by date · <a href="/dashboard/activity">reset to last 7 days</a></p>`
+      ? `<p class="muted mono" style="margin:0 0 10px">filtered by date · <a href="/dashboard/activity">reset to current cohort</a></p>`
       : "";
   return `<main class="reveal">
     ${rangeNote}

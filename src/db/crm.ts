@@ -506,6 +506,20 @@ export async function listCrmMessagesPage(input: CrmMessagePageInput = {}) {
 }
 
 /**
+ * The current lead cohort's earliest creation timestamp — a fixed point-zero
+ * marking the last full lead-list purge/reload, not a rolling "N days ago"
+ * window that would silently start hiding real recent data again once it
+ * ages past that many days. Every lead older than this was hard-deleted;
+ * anything still in crm_leads today was (re)created at or after this moment.
+ */
+export async function getLeadCohortStartDate(): Promise<string | undefined> {
+  const result = await pool.query<{ earliest: Date | null }>(
+    "SELECT min(provider_created_at) AS earliest FROM crm_leads"
+  );
+  return result.rows[0]?.earliest ? result.rows[0].earliest.toISOString() : undefined;
+}
+
+/**
  * Sends today, from our own message mirror rather than Instantly's lifetime
  * campaign counter. The Instantly "sent" figure never resets and accumulates
  * across every lead-list reload since the campaign was created, which makes
@@ -528,7 +542,7 @@ export async function getSentToday(timezone = "America/Detroit") {
   };
 }
 
-export async function getCrmMessageSummary() {
+export async function getCrmMessageSummary(since?: string) {
   const [totals, senders, intents] = await Promise.all([
     pool.query<{ total: string; sent: string; received: string; manual: string; leads: string }>(
       `
@@ -539,16 +553,20 @@ export async function getCrmMessageSummary() {
           count(*) FILTER (WHERE direction = 'manual')::text AS manual,
           count(DISTINCT lower(lead_email)) FILTER (WHERE lead_email IS NOT NULL)::text AS leads
         FROM crm_messages
-      `
+        WHERE ($1::timestamptz IS NULL OR coalesce(timestamp_email, provider_created_at) >= $1)
+      `,
+      [since ?? null]
     ),
     pool.query<{ eaccount: string; count: string }>(
       `
         SELECT eaccount, count(*)::text AS count
         FROM crm_messages
         WHERE eaccount IS NOT NULL
+          AND ($1::timestamptz IS NULL OR coalesce(timestamp_email, provider_created_at) >= $1)
         GROUP BY eaccount
         ORDER BY count(*) DESC, eaccount
-      `
+      `,
+      [since ?? null]
     ),
     // Only intents actually present get offered as filters — a dropdown listing
     // every possible intent mostly promises empty result sets.
@@ -559,9 +577,11 @@ export async function getCrmMessageSummary() {
         JOIN events e
           ON e.provider = 'instantly' AND e.provider_event_id = m.provider_email_id
         JOIN reply_classifications rc ON rc.event_id = e.id
+        WHERE ($1::timestamptz IS NULL OR coalesce(m.timestamp_email, m.provider_created_at) >= $1)
         GROUP BY rc.intent
         ORDER BY count(*) DESC, rc.intent
-      `
+      `,
+      [since ?? null]
     )
   ]);
   const row = totals.rows[0] ?? { total: "0", sent: "0", received: "0", manual: "0", leads: "0" };

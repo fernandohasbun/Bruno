@@ -45,7 +45,7 @@ import {
   getCrmMessageSummary,
   getCrmSummary,
   getLatestReconciliation,
-  getSentToday,
+  getLeadCohortStartDate,
   listCrmLeadMessages,
   listCrmLeadsPage,
   listCrmMessagesPage,
@@ -422,23 +422,30 @@ function campaignStatusLabel(status?: number) {
 async function loadCampaignPulse(): Promise<CampaignPulse | null> {
   try {
     return await cachedFetch<CampaignPulse | null>("instantly:pulse:v3", 300, async () => {
-      const [campaigns, crmSummary, checkpoints, sentToday] = await Promise.all([
+      const [campaigns, crmSummary, checkpoints] = await Promise.all([
         listInstantlyCampaigns({ limit: 100 }),
         getCrmSummary(),
-        listSyncCheckpoints(),
-        getSentToday()
+        listSyncCheckpoints()
       ]);
       if (campaigns.length === 0) return null;
       const personaCampaigns = campaigns.filter((campaign) => campaign.name.startsWith("Kinta | P"));
       const selected = personaCampaigns.length > 0 ? personaCampaigns : [campaigns[0]];
 
+      // Today's date in the campaigns' own sending timezone, not server/UTC —
+      // a send at 11pm UTC can already be "tomorrow" in America/Detroit.
+      const todayLocal = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Detroit" }).format(new Date());
+
       const snapshots = await Promise.all(
         selected.map(async (campaign) => {
-          const [detail, analytics] = await Promise.allSettled([
+          const [detail, analytics, analyticsToday] = await Promise.allSettled([
             getInstantlyCampaign(campaign.id),
-            getCampaignAnalyticsOverview(campaign.id)
+            getCampaignAnalyticsOverview(campaign.id),
+            // Sourced live from Instantly, not our crm_messages mirror — the
+            // mirror can lag hours behind a backfill and would otherwise
+            // silently under-report "today" while it catches up.
+            getCampaignAnalyticsOverview({ campaignId: campaign.id, startDate: todayLocal, endDate: todayLocal })
           ]);
-          return { campaign, detail, analytics };
+          return { campaign, detail, analytics, analyticsToday };
         })
       );
       const senderEmails = [
@@ -502,7 +509,10 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
           : undefined,
         leadCountCapped: false,
         leadsRemaining: leadSyncComplete ? crmSummary.uncontacted : undefined,
-        sentToday: sentToday.total,
+        sentToday: snapshots.reduce(
+          (sum, snapshot) => sum + (snapshot.analyticsToday.status === "fulfilled" ? snapshot.analyticsToday.value.emails_sent_count : 0),
+          0
+        ),
         sent: analytics.reduce((sum, item) => sum + item.emails_sent_count, 0),
         contacted: analytics.reduce((sum, item) => sum + item.contacted_count, 0),
         opensUnique: analytics.reduce((sum, item) => sum + item.open_count_unique, 0),
@@ -1057,12 +1067,14 @@ export async function registerDashboard(app: FastifyInstance) {
     const to = typeof query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.to) ? query.to : undefined;
     // Validated against the intent set so the filter can only ever be one of Bruno's.
     const intent = typeof query.intent === "string" && isReplyIntent(query.intent) ? query.intent : undefined;
-    // Default to the last 7 days so message history from before the lead-list
-    // purge doesn't drown out current activity. Nothing is deleted — "show all
-    // history" (?all=1) or an explicit `from` still reaches every old row.
+    // Default cutoff is the current lead cohort's start date — a fixed point
+    // zero from the last full purge/reload, not a rolling "N days ago" window
+    // that would silently start hiding real recent data again as it ages.
+    // Nothing is deleted — "show all history" (?all=1) or an explicit `from`
+    // still reaches every older row.
     const showAllHistory = query.all === "1";
-    const defaultFrom = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const from = showAllHistory ? explicitFrom : (explicitFrom ?? defaultFrom);
+    const cohortStart = showAllHistory ? undefined : await getLeadCohortStartDate();
+    const from = showAllHistory ? explicitFrom : (explicitFrom ?? cohortStart?.slice(0, 10));
     const [shell, result, summary, checkpoints, campaignsResult] = await Promise.all([
       loadShellContext("activity", "Message activity", true),
       listCrmMessagesPage({
@@ -1075,7 +1087,7 @@ export async function registerDashboard(app: FastifyInstance) {
         to: to ? `${to}T23:59:59.999-06:00` : undefined,
         intent
       }),
-      getCrmMessageSummary(),
+      getCrmMessageSummary(!showAllHistory && !explicitFrom ? cohortStart : undefined),
       listSyncCheckpoints(),
       listInstantlyCampaigns({ limit: 100 }).catch(() => [])
     ]);
@@ -1113,7 +1125,8 @@ export async function registerDashboard(app: FastifyInstance) {
             from,
             to,
             intent,
-            showingLast7Days: !showAllHistory && !explicitFrom,
+            showingSincePurge: !showAllHistory && !explicitFrom,
+            cohortStartDate: cohortStart?.slice(0, 10),
             summary: {
               total: summary.total,
               sent: summary.sent,
