@@ -45,6 +45,7 @@ import {
   getCrmMessageSummary,
   getCrmSummary,
   getLatestReconciliation,
+  getSentToday,
   listCrmLeadMessages,
   listCrmLeadsPage,
   listCrmMessagesPage,
@@ -376,6 +377,8 @@ export interface CampaignPulse {
   linkTracking?: boolean;
   leadCount?: number;
   leadCountCapped?: boolean;
+  leadsRemaining?: number;
+  sentToday: number;
   sent: number;
   contacted: number;
   opensUnique: number;
@@ -418,11 +421,12 @@ function campaignStatusLabel(status?: number) {
  */
 async function loadCampaignPulse(): Promise<CampaignPulse | null> {
   try {
-    return await cachedFetch<CampaignPulse | null>("instantly:pulse:v2", 300, async () => {
-      const [campaigns, crmSummary, checkpoints] = await Promise.all([
+    return await cachedFetch<CampaignPulse | null>("instantly:pulse:v3", 300, async () => {
+      const [campaigns, crmSummary, checkpoints, sentToday] = await Promise.all([
         listInstantlyCampaigns({ limit: 100 }),
         getCrmSummary(),
-        listSyncCheckpoints()
+        listSyncCheckpoints(),
+        getSentToday()
       ]);
       if (campaigns.length === 0) return null;
       const personaCampaigns = campaigns.filter((campaign) => campaign.name.startsWith("Kinta | P"));
@@ -497,6 +501,8 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
           ? selected.reduce((sum, campaign) => sum + (countsByCampaign.get(campaign.id) ?? 0), 0)
           : undefined,
         leadCountCapped: false,
+        leadsRemaining: leadSyncComplete ? crmSummary.uncontacted : undefined,
+        sentToday: sentToday.total,
         sent: analytics.reduce((sum, item) => sum + item.emails_sent_count, 0),
         contacted: analytics.reduce((sum, item) => sum + item.contacted_count, 0),
         opensUnique: analytics.reduce((sum, item) => sum + item.open_count_unique, 0),
@@ -1047,10 +1053,16 @@ export async function registerDashboard(app: FastifyInstance) {
         ? query.direction
         : undefined;
     const sender = typeof query.sender === "string" && query.sender.includes("@") ? query.sender : undefined;
-    const from = typeof query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : undefined;
+    const explicitFrom = typeof query.from === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.from) ? query.from : undefined;
     const to = typeof query.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(query.to) ? query.to : undefined;
     // Validated against the intent set so the filter can only ever be one of Bruno's.
     const intent = typeof query.intent === "string" && isReplyIntent(query.intent) ? query.intent : undefined;
+    // Default to the last 7 days so message history from before the lead-list
+    // purge doesn't drown out current activity. Nothing is deleted — "show all
+    // history" (?all=1) or an explicit `from` still reaches every old row.
+    const showAllHistory = query.all === "1";
+    const defaultFrom = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const from = showAllHistory ? explicitFrom : (explicitFrom ?? defaultFrom);
     const [shell, result, summary, checkpoints, campaignsResult] = await Promise.all([
       loadShellContext("activity", "Message activity", true),
       listCrmMessagesPage({
@@ -1101,6 +1113,7 @@ export async function registerDashboard(app: FastifyInstance) {
             from,
             to,
             intent,
+            showingLast7Days: !showAllHistory && !explicitFrom,
             summary: {
               total: summary.total,
               sent: summary.sent,

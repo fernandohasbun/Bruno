@@ -505,6 +505,29 @@ export async function listCrmMessagesPage(input: CrmMessagePageInput = {}) {
   };
 }
 
+/**
+ * Sends today, from our own message mirror rather than Instantly's lifetime
+ * campaign counter. The Instantly "sent" figure never resets and accumulates
+ * across every lead-list reload since the campaign was created, which makes
+ * it useless for "how many went out today" — this answers that directly.
+ */
+export async function getSentToday(timezone = "America/Detroit") {
+  const result = await pool.query<{ campaign_id: string | null; sent: string }>(
+    `
+      SELECT campaign_id, count(*)::text AS sent
+      FROM crm_messages
+      WHERE direction = 'sent'
+        AND (timestamp_email AT TIME ZONE $1)::date = (now() AT TIME ZONE $1)::date
+      GROUP BY campaign_id
+    `,
+    [timezone]
+  );
+  return {
+    total: result.rows.reduce((sum, row) => sum + Number(row.sent), 0),
+    byCampaign: result.rows.map((row) => ({ campaignId: row.campaign_id, sent: Number(row.sent) }))
+  };
+}
+
 export async function getCrmMessageSummary() {
   const [totals, senders, intents] = await Promise.all([
     pool.query<{ total: string; sent: string; received: string; manual: string; leads: string }>(

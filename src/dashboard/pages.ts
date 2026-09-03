@@ -27,6 +27,8 @@ export interface PulseView {
   linkTracking?: boolean;
   leadCount?: number;
   leadCountCapped?: boolean;
+  leadsRemaining?: number;
+  sentToday: number;
   sent: number;
   contacted: number;
   opensUnique: number;
@@ -551,6 +553,7 @@ export interface ActivityPageModel {
   from?: string;
   to?: string;
   intent?: string;
+  showingLast7Days?: boolean;
   summary: {
     total: number;
     sent: number;
@@ -610,7 +613,13 @@ export function renderActivityPage(m: ActivityPageModel, now: Date) {
           </table>
         </div>`;
 
+  const rangeNote = m.showingLast7Days
+    ? `<p class="muted mono" style="margin:0 0 10px">showing the last 7 days — older history isn't deleted, just hidden here. <a href="/dashboard/activity?all=1">show all history →</a></p>`
+    : m.from || m.to
+      ? `<p class="muted mono" style="margin:0 0 10px">filtered by date · <a href="/dashboard/activity">reset to last 7 days</a></p>`
+      : "";
   return `<main class="reveal">
+    ${rangeNote}
     <section class="crm-summary">
       <div class="crm-stat"><strong>${m.summary.total.toLocaleString("en-US")}</strong><span>all messages</span></div>
       <div class="crm-stat"><strong>${m.summary.sent.toLocaleString("en-US")}</strong><span>campaign sent</span></div>
@@ -1058,9 +1067,14 @@ function renderLiveTiles(pulse: PulseView) {
   return `
     <section class="kpis">
       <div class="tile">
-        <div class="tile-label">Sent · lifetime</div>
-        <div class="tile-value">${pulse.sent.toLocaleString("en-US")}</div>
-        <div class="tile-sub">${pulse.leadCount !== undefined ? `${pulse.leadCount}${pulse.leadCountCapped ? "+" : ""} leads loaded` : "live from Instantly"}</div>
+        <div class="tile-label">Sent · today</div>
+        <div class="tile-value">${pulse.sentToday.toLocaleString("en-US")}</div>
+        <div class="tile-sub">${pulse.sent.toLocaleString("en-US")} sent lifetime</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">Leads remaining</div>
+        <div class="tile-value">${pulse.leadsRemaining !== undefined ? pulse.leadsRemaining.toLocaleString("en-US") : "—"}</div>
+        <div class="tile-sub">${pulse.leadCount !== undefined ? `${pulse.leadCount}${pulse.leadCountCapped ? "+" : ""} leads loaded, not yet contacted` : "live from Instantly"}</div>
       </div>
       <div class="tile">
         <div class="tile-label">Opens</div>
