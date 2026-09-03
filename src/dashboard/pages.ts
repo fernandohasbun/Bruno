@@ -1110,11 +1110,18 @@ function renderPersonaPerformance(m: CampaignModel) {
     const clickRate = row.linkTracking
       ? formatPercent(row.clicks, row.sent)
       : "off";
-    const contactedPct = row.totalLeads !== undefined ? formatPercent(row.contacted, row.totalLeads) : "—";
+    // contacted can exceed totalLeads: Instantly's contacted_count credits a
+    // lead permanently once sent to, even after it's removed from the current
+    // list (e.g. a Microsoft-hosted lead contacted before being moved to the
+    // held-out list). totalLeads only counts who's in the campaign right now,
+    // so the two aren't naturally comparable when leads have left.
+    const exceedsTotal = row.totalLeads !== undefined && row.contacted > row.totalLeads;
+    const contactedPct =
+      row.totalLeads !== undefined ? (exceedsTotal ? "100%+" : formatPercent(row.contacted, row.totalLeads)) : "—";
     const remaining = row.totalLeads !== undefined ? Math.max(0, row.totalLeads - row.contacted) : undefined;
     return `<tr>
       <td><strong>${escapeHtml(row.persona)}</strong></td>
-      <td class="mono num">${row.contacted}${row.totalLeads !== undefined ? ` / ${row.totalLeads}` : ""}</td>
+      <td class="mono num">${row.contacted}${row.totalLeads !== undefined ? ` / ${row.totalLeads}` : ""}${exceedsTotal ? ` <span class="muted" title="${row.contacted - (row.totalLeads ?? 0)} of these were contacted before being removed from this list (e.g. moved to a held-out list)">*</span>` : ""}</td>
       <td class="mono num">${contactedPct}</td>
       <td class="mono num">${remaining ?? "—"}</td>
       <td class="mono num">${row.sent}</td>
