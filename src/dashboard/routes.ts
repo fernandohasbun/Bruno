@@ -378,6 +378,7 @@ export interface CampaignPulse {
   leadCount?: number;
   leadCountCapped?: boolean;
   leadsRemaining?: number;
+  cohortStartDate?: string;
   sentToday: number;
   sent: number;
   contacted: number;
@@ -422,10 +423,11 @@ function campaignStatusLabel(status?: number) {
 async function loadCampaignPulse(): Promise<CampaignPulse | null> {
   try {
     return await cachedFetch<CampaignPulse | null>("instantly:pulse:v3", 300, async () => {
-      const [campaigns, crmSummary, checkpoints] = await Promise.all([
+      const [campaigns, crmSummary, checkpoints, cohortStart] = await Promise.all([
         listInstantlyCampaigns({ limit: 100 }),
         getCrmSummary(),
-        listSyncCheckpoints()
+        listSyncCheckpoints(),
+        getLeadCohortStartDate()
       ]);
       if (campaigns.length === 0) return null;
       const personaCampaigns = campaigns.filter((campaign) => campaign.name.startsWith("Kinta | P"));
@@ -434,12 +436,19 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
       // Today's date in the campaigns' own sending timezone, not server/UTC —
       // a send at 11pm UTC can already be "tomorrow" in America/Detroit.
       const todayLocal = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Detroit" }).format(new Date());
+      const cohortStartLocal = cohortStart?.slice(0, 10);
 
       const snapshots = await Promise.all(
         selected.map(async (campaign) => {
           const [detail, analytics, analyticsToday] = await Promise.allSettled([
             getInstantlyCampaign(campaign.id),
-            getCampaignAnalyticsOverview(campaign.id),
+            // Scoped to the current lead cohort's start, not Instantly's
+            // lifetime-since-campaign-creation counter — every number derived
+            // from this (sent, replies, bounces, opens, clicks) should read
+            // as "since the last purge," not mixed with dead-cohort history.
+            cohortStartLocal
+              ? getCampaignAnalyticsOverview({ campaignId: campaign.id, startDate: cohortStartLocal, endDate: todayLocal })
+              : getCampaignAnalyticsOverview(campaign.id),
             // Sourced live from Instantly, not our crm_messages mirror — the
             // mirror can lag hours behind a backfill and would otherwise
             // silently under-report "today" while it catches up.
@@ -509,6 +518,7 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
           : undefined,
         leadCountCapped: false,
         leadsRemaining: leadSyncComplete ? crmSummary.uncontacted : undefined,
+        cohortStartDate: cohortStartLocal,
         sentToday: snapshots.reduce(
           (sum, snapshot) => sum + (snapshot.analyticsToday.status === "fulfilled" ? snapshot.analyticsToday.value.emails_sent_count : 0),
           0
@@ -668,6 +678,7 @@ export async function registerDashboard(app: FastifyInstance) {
           lastPollAgo: agoLabel(minutesSince(lastPollAt)),
           campaignStatus: pulse?.statusLabel,
           campaignSent: pulse?.sent,
+          cohortStartDate: pulse?.cohortStartDate,
           dailyLimit: pulse?.dailyLimit
         },
         chatId,

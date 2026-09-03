@@ -724,6 +724,19 @@ export async function recordReconciliation(input: {
   );
 }
 
+/**
+ * Drop reconciliation history for any scope not in the current live campaign
+ * list. A deleted campaign never gets rechecked again — without this its
+ * last recorded state (often a stale "mismatch" from before it was cleaned
+ * up) sits in reconciliation_runs forever, misreported as an ongoing problem.
+ */
+export async function pruneReconciliationExcept(liveScopes: string[]) {
+  await pool.query(
+    `DELETE FROM reconciliation_runs WHERE scope LIKE 'campaign:%' AND NOT (scope = ANY($1::text[]))`,
+    [liveScopes]
+  );
+}
+
 export async function getLatestReconciliation() {
   const result = await pool.query<{
     scope: string;

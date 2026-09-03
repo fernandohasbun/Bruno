@@ -28,6 +28,7 @@ export interface PulseView {
   leadCount?: number;
   leadCountCapped?: boolean;
   leadsRemaining?: number;
+  cohortStartDate?: string;
   sentToday: number;
   sent: number;
   contacted: number;
@@ -125,6 +126,7 @@ export interface BriefingModel {
   lastPollAgo?: string;
   campaignStatus?: string;
   campaignSent?: number;
+  cohortStartDate?: string;
   dailyLimit?: number;
 }
 
@@ -162,7 +164,7 @@ function briefingRows(b: BriefingModel) {
   if (b.campaignStatus) {
     rows.push(
       `<span class="b-flag">camp</span> Campaign is <strong>${escapeHtml(b.campaignStatus)}</strong>${
-        b.campaignSent !== undefined ? ` — ${b.campaignSent} sent lifetime` : ""
+        b.campaignSent !== undefined ? ` — ${b.campaignSent} sent${b.cohortStartDate ? ` since ${b.cohortStartDate}` : ""}` : ""
       }${b.dailyLimit !== undefined ? `, limit ${b.dailyLimit}/day` : ""}. <a href="/dashboard/campaign">Campaign →</a>`
     );
   }
@@ -1070,7 +1072,7 @@ function renderLiveTiles(pulse: PulseView) {
       <div class="tile">
         <div class="tile-label">Sent · today</div>
         <div class="tile-value">${pulse.sentToday.toLocaleString("en-US")}</div>
-        <div class="tile-sub">${pulse.sent.toLocaleString("en-US")} sent lifetime</div>
+        <div class="tile-sub">${pulse.sent.toLocaleString("en-US")} sent${pulse.cohortStartDate ? ` since ${pulse.cohortStartDate}` : ""}</div>
       </div>
       <div class="tile">
         <div class="tile-label">Leads remaining</div>

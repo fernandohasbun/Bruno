@@ -4,6 +4,7 @@ import {
   getLocalCampaignCounts,
   getSyncCheckpoint,
   pruneCrmLeadsOlderThan,
+  pruneReconciliationExcept,
   recordReconciliation,
   saveCampaignSnapshot,
   startSync,
@@ -169,5 +170,13 @@ export async function processCrmReconcileJob(_job: QueueJob) {
       await clearAlertOnce(alertKey);
     }
   }
+
+  // A campaign deleted in Instantly (e.g. an old test campaign cleaned up
+  // manually) stops appearing in `campaigns` above and so is never rechecked
+  // again — its last "mismatch" row would otherwise sit in reconciliation_runs
+  // forever, flagged as a live problem on the System page indefinitely.
+  // Prune reconciliation history for anything no longer live.
+  const liveScopes = campaigns.map((campaign) => `campaign:${campaign.id}`);
+  await pruneReconciliationExcept(liveScopes);
   });
 }
