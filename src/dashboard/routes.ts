@@ -699,14 +699,14 @@ export async function registerDashboard(app: FastifyInstance) {
   // Inbox — who replied, hottest first
   app.get("/dashboard/inbox", async (request, reply) => {
     if (!authorizePage(request, reply, "/dashboard/inbox")) return reply;
-    const [shell, drafts, feed, activity, pulse, awayRows] = await Promise.all([
+    const [shell, drafts, feed, activity, pulse] = await Promise.all([
       loadShellContext("inbox", "Inbox", true),
       listPendingDrafts(20),
       listRecentClassifications(40),
       listRecentApprovals(12),
-      loadCampaignPulse(),
-      listAwayLeads(40)
+      loadCampaignPulse()
     ]);
+    const awayRows = await listAwayLeads(40, pulse?.cohortStartDate);
 
     const cards = drafts
       .map(toDraftCard)
@@ -714,7 +714,12 @@ export async function registerDashboard(app: FastifyInstance) {
         (a, b) => HOT_INTENTS.indexOf(a.intent) - HOT_INTENTS.indexOf(b.intent) || a.createdAt.localeCompare(b.createdAt)
       );
     // Sections come from the total mapping, so a reply cannot fall through them all.
-    const sectioned = feed.filter((row) => isReplyIntent(row.intent));
+    // A reply from before the current lead cohort started is from a purged,
+    // no-longer-live list — it should read as history, not a current section.
+    const cohortStartMs = pulse?.cohortStartDate ? new Date(pulse.cohortStartDate).getTime() : undefined;
+    const sectioned = feed.filter(
+      (row) => isReplyIntent(row.intent) && (cohortStartMs === undefined || new Date(row.created_at).getTime() >= cohortStartMs)
+    );
     const needsRead = sectioned
       .filter((row) => inboxSection(row.intent as ReplyIntent) === "needs_read" && row.draft_status === null)
       .slice(0, 10)

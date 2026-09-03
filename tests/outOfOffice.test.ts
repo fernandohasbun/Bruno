@@ -240,8 +240,13 @@ test("the away list is documented to clear three ways", () => {
   // A pending draft means they moved to "Waiting on you" — they cannot be in both.
   assert.ok(/NOT EXISTS[\s\S]*d\.status = 'drafted'/.test(query), "away query must exclude leads with a pending draft");
 
-  // And stale auto-replies age out rather than accumulating forever.
-  assert.ok(/created_at > now\(\) - /.test(query), "away query must bound how old an auto-reply can be");
+  // And stale auto-replies age out rather than accumulating forever — either
+  // via the rolling window, or (taking priority) a fixed lead-cohort-start
+  // cutoff so a purged cohort's replies never resurface regardless of age.
+  assert.ok(
+    /created_at > coalesce\(\$3::timestamptz, now\(\) - /.test(query),
+    "away query must bound how old an auto-reply can be"
+  );
 });
 
 test("live campaign names still resolve to a persona", () => {

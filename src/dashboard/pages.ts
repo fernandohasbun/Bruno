@@ -1023,7 +1023,7 @@ export function renderInboxPage(
     ${drafts.length > 0 ? cards : empty}
     ${needsReadHtml}
     ${renderAwaySection(away, now)}
-    <h2>Handled for you · 7d</h2>
+    <h2>Handled for you${pulse?.cohortStartDate ? ` · since ${pulse.cohortStartDate}` : ""}</h2>
     ${handledHtml}
     <h2>Recent actions</h2>
     ${log}

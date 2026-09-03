@@ -126,7 +126,14 @@ const AWAY_MAX_AGE_DAYS = 60;
  *    writes another out_of_office row, so intent alone cannot tell them apart
  *  - nothing happens for two months and the auto-reply ages out
  */
-export async function listAwayLeads(limit = 40): Promise<AwayLeadRow[]> {
+/**
+ * `since`, when given, is the current lead cohort's start date — a fixed
+ * point-zero from the last full purge. It takes priority over the rolling
+ * 60-day window: a lead from a purged cohort is gone, not just old, and
+ * should never resurface here regardless of how recently it aged past 60
+ * days. Falls back to the rolling window only if no cohort date is known.
+ */
+export async function listAwayLeads(limit = 40, since?: string): Promise<AwayLeadRow[]> {
   const result = await pool.query<AwayLeadRow>(
     `
       WITH latest AS (
@@ -151,7 +158,7 @@ export async function listAwayLeads(limit = 40): Promise<AwayLeadRow[]> {
       LEFT JOIN scheduled_retargets r
         ON lower(r.email) = lower(rc.email) AND r.status = 'scheduled'
       WHERE rc.intent = 'out_of_office'
-        AND rc.created_at > now() - ($2 || ' days')::interval
+        AND rc.created_at > coalesce($3::timestamptz, now() - ($2 || ' days')::interval)
         AND NOT EXISTS (
           SELECT 1
           FROM drafts d
@@ -160,7 +167,7 @@ export async function listAwayLeads(limit = 40): Promise<AwayLeadRow[]> {
         )
       LIMIT $1
     `,
-    [limit, AWAY_MAX_AGE_DAYS]
+    [limit, AWAY_MAX_AGE_DAYS, since ?? null]
   );
   // Soonest return first; the dateless ones sit at the bottom.
   return result.rows.sort((a, b) => {
