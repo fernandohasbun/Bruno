@@ -425,7 +425,10 @@ export interface LeadsPageModel {
 function pageHref(path: string, params: Record<string, string | number | undefined>) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== "" && value !== "all") query.set(key, String(value));
+    // "all" is a real selection, not an absent one: the leads route defaults a
+    // missing view to "contacted", so dropping view=all from the URL sent the
+    // "all" tab straight back to "contacted".
+    if (value !== undefined && value !== "") query.set(key, String(value));
   }
   const suffix = query.toString();
   return `${path}${suffix ? `?${suffix}` : ""}`;
