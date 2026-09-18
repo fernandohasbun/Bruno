@@ -1,4 +1,5 @@
 import { pool } from "./pool.js";
+import { getConfigValue } from "./config.js";
 import type {
   InstantlyCampaignDetail,
   InstantlyEmailRecord,
@@ -512,7 +513,34 @@ export async function listCrmMessagesPage(input: CrmMessagePageInput = {}) {
  * ages past that many days. Every lead older than this was hard-deleted;
  * anything still in crm_leads today was (re)created at or after this moment.
  */
+/**
+ * Which outbound cohort the dashboard is currently reporting on. Leads carry
+ * their cohort as an Instantly custom variable, which lands in custom_fields.
+ * Unset means "no cohort filtering" and every view falls back to all-time.
+ */
+export async function getActiveCohort(): Promise<string | undefined> {
+  const value = await getConfigValue<string | number>("active_cohort");
+  return value === undefined || value === null ? undefined : String(value);
+}
+
+/**
+ * The cutoff that every "hide older history" view filters on.
+ *
+ * Derived from the active cohort's own leads rather than a hand-set date, so
+ * the boundary always lands exactly where that cohort actually started. Falls
+ * back to the whole table when no cohort is set, or when the cohort has no
+ * leads synced yet (the lead sync runs every 15 minutes, so a freshly
+ * uploaded cohort is briefly invisible here).
+ */
 export async function getLeadCohortStartDate(): Promise<string | undefined> {
+  const cohort = await getActiveCohort();
+  if (cohort) {
+    const scoped = await pool.query<{ earliest: Date | null }>(
+      "SELECT min(provider_created_at) AS earliest FROM crm_leads WHERE custom_fields->>'cohort' = $1",
+      [cohort]
+    );
+    if (scoped.rows[0]?.earliest) return scoped.rows[0].earliest.toISOString();
+  }
   const result = await pool.query<{ earliest: Date | null }>(
     "SELECT min(provider_created_at) AS earliest FROM crm_leads"
   );

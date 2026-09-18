@@ -45,6 +45,7 @@ import {
   getCrmMessageSummary,
   getCrmSummary,
   getLatestReconciliation,
+  getActiveCohort,
   getLeadCohortStartDate,
   listCrmLeadMessages,
   listCrmLeadsPage,
@@ -431,13 +432,20 @@ async function loadCampaignPulse(): Promise<CampaignPulse | null> {
         getLeadCohortStartDate()
       ]);
       if (campaigns.length === 0) return null;
-      // Exact membership in the canonical list, not a name prefix — "Kinta | P1 EA
-      // | MSFT hold | 2026-08" also starts with "Kinta | P" and would otherwise
-      // leak zero-rows for the held-out Microsoft leads into every pulse-derived
-      // view (KPIs, persona performance, Bruno's brief).
-      const personaCampaigns = campaigns.filter((campaign) =>
-        KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
-      );
+      // Selected by cohort, not by a hardcoded name list: campaign names change
+      // between cohorts, and matching a stale registry silently selects nothing
+      // and falls through to an arbitrary campaign. "MSFT hold" campaigns are
+      // excluded because they only park held-out leads and never send, so they
+      // would otherwise contribute zero-rows to every pulse-derived view.
+      const cohort = await getActiveCohort();
+      const personaCampaigns = cohort
+        ? campaigns.filter(
+            (campaign) =>
+              campaign.name.includes(`| C${cohort} `) && !campaign.name.includes("MSFT hold")
+          )
+        : campaigns.filter((campaign) =>
+            KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
+          );
       const selected = personaCampaigns.length > 0 ? personaCampaigns : [campaigns[0]];
 
       // Today's date in the campaigns' own sending timezone, not server/UTC —
@@ -575,9 +583,16 @@ function scheduleLabel(value: unknown) {
 
 async function loadManagedCampaignControls() {
   try {
-    const campaigns = (await listInstantlyCampaigns({ limit: 100 })).filter((campaign) =>
-      KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
-    );
+    const cohort = await getActiveCohort();
+    const all = await listInstantlyCampaigns({ limit: 100 });
+    const campaigns = cohort
+      ? all.filter(
+          (campaign) =>
+            campaign.name.includes(`| C${cohort} `) && !campaign.name.includes("MSFT hold")
+        )
+      : all.filter((campaign) =>
+          KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
+        );
     const details = await Promise.allSettled(campaigns.map((campaign) => getInstantlyCampaign(campaign.id)));
     return campaigns.map((campaign, index) => {
       const result = details[index];
