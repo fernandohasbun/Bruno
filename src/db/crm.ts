@@ -514,13 +514,21 @@ export async function listCrmMessagesPage(input: CrmMessagePageInput = {}) {
  * anything still in crm_leads today was (re)created at or after this moment.
  */
 /**
- * Which outbound cohort the dashboard is currently reporting on. Leads carry
- * their cohort as an Instantly custom variable, which lands in custom_fields.
- * Unset means "no cohort filtering" and every view falls back to all-time.
+ * Which outbound cohort the dashboard reports on. Leads carry their cohort as
+ * an Instantly custom variable, which lands in custom_fields.
+ *
+ * Defaults to the cohort currently being sent so a fresh deployment reports on
+ * live work without anyone having to set anything. The config key overrides it
+ * at runtime (set it to an older cohort to look back, or to "" to disable
+ * cohort filtering entirely and report all-time).
  */
+const CURRENT_COHORT = "3";
+
 export async function getActiveCohort(): Promise<string | undefined> {
   const value = await getConfigValue<string | number>("active_cohort");
-  return value === undefined || value === null ? undefined : String(value);
+  if (value === undefined || value === null) return CURRENT_COHORT;
+  const configured = String(value).trim();
+  return configured === "" ? undefined : configured;
 }
 
 /**
