@@ -321,6 +321,7 @@ export async function listCrmLeadsPage(input: CrmLeadPageInput = {}) {
         AND ($3::integer IS NULL OR l.status = $3)
         AND ($4::integer IS NULL OR l.interest_status = $4)
         AND ($5::text IS NULL OR l.custom_fields->>'persona' = $5)
+        AND ($9::text IS NULL OR l.custom_fields->>'cohort' = $9)
         AND (
           $6::text IS NULL OR $6 = 'all'
           OR ($6 = 'contacted' AND l.last_contact_at IS NOT NULL)
@@ -344,7 +345,8 @@ export async function listCrmLeadsPage(input: CrmLeadPageInput = {}) {
       input.persona ?? null,
       input.view ?? null,
       pageSize,
-      (page - 1) * pageSize
+      (page - 1) * pageSize,
+      await getActiveCohort() ?? null
     ]
   );
   return {
@@ -356,6 +358,10 @@ export async function listCrmLeadsPage(input: CrmLeadPageInput = {}) {
 }
 
 export async function getCrmSummary() {
+  // Every count on the roster is scoped to the active cohort. Without this the
+  // page merges cohorts, e.g. showing 2,294 leads where the live cohort has
+  // 1,767, with the "contacted" figure coming almost entirely from the old one.
+  const cohort = (await getActiveCohort()) ?? null;
   const [totals, campaigns, personas] = await Promise.all([
     pool.query<{
       total: string;
@@ -393,15 +399,20 @@ export async function getCrmSummary() {
           count(*) FILTER (WHERE l.interest_status IN (2, 3, 4))::text AS meetings
         FROM crm_leads l
         LEFT JOIN latest b ON b.email = lower(l.email)
-      `
+        WHERE ($1::text IS NULL OR l.custom_fields->>'cohort' = $1)
+      `,
+      [cohort]
     ),
     pool.query<{ campaign_id: string | null; total: string; contacted: string; replied: string }>(
       `
         SELECT campaign_id, count(*)::text AS total,
                count(*) FILTER (WHERE last_contact_at IS NOT NULL)::text AS contacted,
                count(*) FILTER (WHERE email_reply_count > 0)::text AS replied
-        FROM crm_leads GROUP BY campaign_id ORDER BY count(*) DESC
-      `
+        FROM crm_leads
+        WHERE ($1::text IS NULL OR custom_fields->>'cohort' = $1)
+        GROUP BY campaign_id ORDER BY count(*) DESC
+      `,
+      [cohort]
     ),
     pool.query<{ persona: string; total: string; contacted: string; replied: string }>(
       `
@@ -409,8 +420,11 @@ export async function getCrmSummary() {
                count(*)::text AS total,
                count(*) FILTER (WHERE last_contact_at IS NOT NULL)::text AS contacted,
                count(*) FILTER (WHERE email_reply_count > 0)::text AS replied
-        FROM crm_leads GROUP BY 1 ORDER BY count(*) DESC
-      `
+        FROM crm_leads
+        WHERE ($1::text IS NULL OR custom_fields->>'cohort' = $1)
+        GROUP BY 1 ORDER BY count(*) DESC
+      `,
+      [cohort]
     )
   ]);
   const row = totals.rows[0] ?? {
