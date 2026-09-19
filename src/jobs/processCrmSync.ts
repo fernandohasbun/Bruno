@@ -125,7 +125,13 @@ export async function processCrmMessageSyncJob(_job: QueueJob) {
 
 export async function processCrmReconcileJob(_job: QueueJob) {
   return withSyncLock("crm.reconcile", async () => {
-  const campaigns = await listInstantlyCampaigns({ limit: 100 });
+  const all = await listInstantlyCampaigns({ limit: 100 });
+  // Reconciliation is the most expensive job against Instantly's 20/minute
+  // budget: every campaign costs a detail call, an analytics call, and a
+  // paginated lead count. Draft campaigns have never sent and their counts
+  // cannot drift, so walking them each hour burns the budget that the reply
+  // poll and message sync need.
+  const campaigns = all.filter((campaign) => campaign.status !== 0);
 
   for (const campaign of campaigns) {
     const [detail, analytics, providerLeadCount, local] = await Promise.all([
@@ -176,7 +182,10 @@ export async function processCrmReconcileJob(_job: QueueJob) {
   // again — its last "mismatch" row would otherwise sit in reconciliation_runs
   // forever, flagged as a live problem on the System page indefinitely.
   // Prune reconciliation history for anything no longer live.
-  const liveScopes = campaigns.map((campaign) => `campaign:${campaign.id}`);
+  // Keyed off every campaign that exists, not just the ones reconciled above:
+  // a draft campaign is skipped for cost reasons but still exists, and its
+  // history should survive.
+  const liveScopes = all.map((campaign) => `campaign:${campaign.id}`);
   await pruneReconciliationExcept(liveScopes);
   });
 }

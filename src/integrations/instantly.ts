@@ -5,8 +5,46 @@ const INSTANTLY_BASE_URL = "https://api.instantly.ai";
 const RATE_LIMIT_MAX_ATTEMPTS = 5;
 const RATE_LIMIT_BASE_DELAY_MS = 2_000;
 
+/**
+ * Instantly allows 20 requests/minute for the whole workspace. Several jobs
+ * share that budget and individually exceed it: the hourly reconciliation
+ * walks every campaign (3+ requests each, more for campaigns whose leads
+ * paginate), and the message sync pulls up to 15 pages every 2 minutes.
+ *
+ * Retrying does not help when the requests genuinely exceed the ceiling, so
+ * callers queue here instead. Every Instantly call funnels through
+ * instantlyFetch, so one shared gate paces all of them. Held slightly under
+ * the real limit to leave room for anyone working the API by hand.
+ */
+const RATE_LIMIT_PER_MINUTE = 16;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+
+const recentRequests: number[] = [];
+let gate: Promise<void> = Promise.resolve();
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Resolves once a request slot is free, recording the slot it took. */
+function reserveRequestSlot(): Promise<void> {
+  // Chained so concurrent callers are served in order rather than all waking
+  // at once and bursting past the limit together.
+  const wait = gate.then(async () => {
+    for (;;) {
+      const cutoff = Date.now() - RATE_LIMIT_WINDOW_MS;
+      while (recentRequests.length > 0 && recentRequests[0] <= cutoff) {
+        recentRequests.shift();
+      }
+      if (recentRequests.length < RATE_LIMIT_PER_MINUTE) {
+        recentRequests.push(Date.now());
+        return;
+      }
+      await sleep(Math.max(250, recentRequests[0] - cutoff));
+    }
+  });
+  gate = wait.catch(() => undefined);
+  return wait;
 }
 
 // Instantly caps at 20 requests/minute workspace-wide. A scheduled sync job
@@ -25,12 +63,16 @@ async function instantlyFetch(path: string, init?: RequestInit) {
   }
 
   for (let attempt = 1; attempt <= RATE_LIMIT_MAX_ATTEMPTS; attempt++) {
+    await reserveRequestSlot();
     const response = await fetch(`${INSTANTLY_BASE_URL}${path}`, {
       ...init,
       headers
     });
 
-    if (response.status === 429 && attempt < RATE_LIMIT_MAX_ATTEMPTS) {
+    // 5xx is transient too: a single Instantly-side 500 previously failed a
+    // whole sync cycle, which is exactly what a retry is for.
+    const retryable = response.status === 429 || response.status >= 500;
+    if (retryable && attempt < RATE_LIMIT_MAX_ATTEMPTS) {
       const retryAfterHeader = Number(response.headers.get("retry-after"));
       const delayMs = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
         ? retryAfterHeader * 1000
@@ -47,7 +89,7 @@ async function instantlyFetch(path: string, init?: RequestInit) {
     return response.json() as Promise<unknown>;
   }
 
-  throw new Error("Instantly API failed: exhausted retries after repeated 429 rate limiting");
+  throw new Error("Instantly API failed: exhausted retries after repeated rate limiting or server errors");
 }
 
 function queryString(params: Record<string, string | number | boolean | undefined>) {
