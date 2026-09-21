@@ -750,6 +750,18 @@ export async function listLatestCampaignNames(): Promise<Map<string, string>> {
   );
 }
 
+/** Latest saved campaign details for dashboard pages that must not wait on Instantly. */
+export async function listLatestCampaignSnapshots(): Promise<InstantlyCampaignDetail[]> {
+  const result = await pool.query<{ snapshot: InstantlyCampaignDetail }>(
+    `
+      SELECT DISTINCT ON (campaign_id) snapshot
+      FROM campaign_snapshots
+      ORDER BY campaign_id, captured_at DESC, id DESC
+    `
+  );
+  return result.rows.map((row) => row.snapshot);
+}
+
 export async function saveCampaignSnapshot(campaign: InstantlyCampaignDetail, reason = "sync") {
   const snapshot = JSON.stringify(campaign);
   await pool.query(

@@ -51,6 +51,7 @@ import {
   listCrmLeadsPage,
   listCrmMessagesPage,
   listLatestCampaignNames,
+  listLatestCampaignSnapshots,
   listRecentAgentActions,
   listSyncCheckpoints,
   recordAgentAction,
@@ -82,6 +83,7 @@ import {
   pauseInstantlyCampaign,
   sendReplyEmail,
   setLeadInterest,
+  type InstantlyCampaignDetail,
   type InstantlyLeadEngagement,
   type InstantlyLeadRecord,
   type LeadEmailItem
@@ -606,30 +608,62 @@ function scheduleLabel(value: unknown) {
   return `${activeDays || "no active days"} · ${from}–${to} · ${timezone}`;
 }
 
-async function loadManagedCampaignControls() {
+type ManagedCampaignControl = {
+  id: string;
+  name: string;
+  status: string;
+  dailyLimit?: number;
+  schedule?: string;
+};
+
+function selectManagedCampaigns<T extends { name: string }>(campaigns: T[], cohort?: string): T[] {
+  return cohort
+    ? campaigns.filter((campaign) => campaign.name.includes(`| C${cohort} `) && !campaign.name.includes("MSFT hold"))
+    : campaigns.filter((campaign) => KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name));
+}
+
+function toManagedCampaignControl(campaign: InstantlyCampaignDetail): ManagedCampaignControl {
+  return {
+    id: campaign.id,
+    name: campaign.name,
+    status: campaignStatusLabel(campaign.status),
+    dailyLimit: campaign.daily_limit ?? undefined,
+    schedule: scheduleLabel(campaign.campaign_schedule)
+  };
+}
+
+async function buildManagedCampaignControls(): Promise<ManagedCampaignControl[]> {
+  const [cohort, all] = await Promise.all([getActiveCohort(), listInstantlyCampaigns({ limit: 100 })]);
+  const campaigns = selectManagedCampaigns(all, cohort);
+  const details = await Promise.allSettled(campaigns.map((campaign) => getInstantlyCampaign(campaign.id)));
+  return campaigns.map((campaign, index) => {
+    const detail = details[index];
+    return toManagedCampaignControl(detail.status === "fulfilled" ? detail.value : campaign);
+  });
+}
+
+const CAMPAIGN_CONTROLS_CACHE_KEY = "instantly:campaign-controls:v1";
+const CAMPAIGN_CONTROLS_TTL_SECONDS = 600;
+let campaignControlsRefresh: Promise<void> | undefined;
+let nextCampaignControlsRefreshAt = 0;
+
+function refreshManagedCampaignControls() {
+  if (campaignControlsRefresh || Date.now() < nextCampaignControlsRefreshAt) return;
+  nextCampaignControlsRefreshAt = Date.now() + 120_000;
+  campaignControlsRefresh = buildManagedCampaignControls()
+    .then((controls) => setCachedValue(CAMPAIGN_CONTROLS_CACHE_KEY, controls, CAMPAIGN_CONTROLS_TTL_SECONDS))
+    .catch(() => undefined)
+    .finally(() => { campaignControlsRefresh = undefined; });
+}
+
+async function loadManagedCampaignControls(): Promise<ManagedCampaignControl[]> {
   try {
-    const cohort = await getActiveCohort();
-    const all = await listInstantlyCampaigns({ limit: 100 });
-    const campaigns = cohort
-      ? all.filter(
-          (campaign) =>
-            campaign.name.includes(`| C${cohort} `) && !campaign.name.includes("MSFT hold")
-        )
-      : all.filter((campaign) =>
-          KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
-        );
-    const details = await Promise.allSettled(campaigns.map((campaign) => getInstantlyCampaign(campaign.id)));
-    return campaigns.map((campaign, index) => {
-      const result = details[index];
-      const detail = result.status === "fulfilled" ? result.value : undefined;
-      return {
-        id: campaign.id,
-        name: campaign.name,
-        status: campaignStatusLabel(detail?.status ?? campaign.status),
-        dailyLimit: detail?.daily_limit ?? undefined,
-        schedule: scheduleLabel(detail?.campaign_schedule)
-      };
-    });
+    const entry = await getStoredCacheEntry<ManagedCampaignControl[]>(CAMPAIGN_CONTROLS_CACHE_KEY);
+    const now = Date.now();
+    if (!entry || entry.expiresAt.getTime() <= now) refreshManagedCampaignControls();
+    if (entry && now - entry.expiresAt.getTime() <= 60 * 60 * 1000) return entry.value;
+    const [cohort, snapshots] = await Promise.all([getActiveCohort(), listLatestCampaignSnapshots()]);
+    return selectManagedCampaigns(snapshots, cohort).map(toManagedCampaignControl);
   } catch {
     return [];
   }
@@ -1445,6 +1479,8 @@ export async function registerDashboard(app: FastifyInstance) {
         providerResponse
       });
       await deleteCachedValue(CAMPAIGN_PULSE_CACHE_KEY);
+      await deleteCachedValue(CAMPAIGN_CONTROLS_CACHE_KEY);
+      nextCampaignControlsRefreshAt = 0;
       return reply.send({ ok: true, campaign: after });
     } catch (error) {
       await recordAgentAction({

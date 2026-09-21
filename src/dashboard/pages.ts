@@ -1221,7 +1221,7 @@ export function renderCampaignPage(m: CampaignModel) {
 
   const controls =
     m.controls.length === 0
-      ? `<p class="muted">Managed campaign controls are unavailable while Instantly is unreachable.</p>`
+      ? `<p class="muted">Campaign controls are temporarily unavailable. Refresh shortly.</p>`
       : `<div class="control-list">${m.controls
           .map((campaign) => {
             const isLive = campaign.status === "active" || campaign.status === "running";
