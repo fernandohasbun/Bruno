@@ -734,6 +734,22 @@ export async function listSyncCheckpoints() {
   return result.rows;
 }
 
+/** Campaign names captured by the reconciliation job for local dashboard reads. */
+export async function listLatestCampaignNames(): Promise<Map<string, string>> {
+  const result = await pool.query<{ campaign_id: string; campaign_name: string | null }>(
+    `
+      SELECT DISTINCT ON (campaign_id) campaign_id, campaign_name
+      FROM campaign_snapshots
+      ORDER BY campaign_id, captured_at DESC, id DESC
+    `
+  );
+  return new Map(
+    result.rows
+      .filter((row): row is { campaign_id: string; campaign_name: string } => row.campaign_name !== null)
+      .map((row) => [row.campaign_id, row.campaign_name])
+  );
+}
+
 export async function saveCampaignSnapshot(campaign: InstantlyCampaignDetail, reason = "sync") {
   const snapshot = JSON.stringify(campaign);
   await pool.query(

@@ -8,6 +8,16 @@ export async function getCachedValue<T>(key: string): Promise<T | undefined> {
   return result.rows[0]?.value;
 }
 
+/** Read a cache entry even after its TTL so slow upstream refreshes need not block a page. */
+export async function getStoredCacheEntry<T>(key: string): Promise<{ value: T; expiresAt: Date } | undefined> {
+  const result = await pool.query<{ value: T; expires_at: Date }>(
+    "SELECT value, expires_at FROM cached_records WHERE cache_key = $1",
+    [key]
+  );
+  const row = result.rows[0];
+  return row ? { value: row.value, expiresAt: row.expires_at } : undefined;
+}
+
 export async function setCachedValue(key: string, value: unknown, ttlSeconds: number) {
   await pool.query(
     `

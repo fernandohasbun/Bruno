@@ -28,7 +28,8 @@ const envSchema = z.object({
   SLACK_CHANNEL_ANALYTICS: z.string().default("agent-analytics"),
 
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
-  WORKER_CONCURRENCY: z.coerce.number().int().positive().default(3)
+  WORKER_CONCURRENCY: z.coerce.number().int().positive().default(3),
+  ENABLE_BACKGROUND_JOBS: z.enum(["true", "false"]).default("true").transform((value) => value === "true")
 });
 
 export const env = envSchema.parse(process.env);

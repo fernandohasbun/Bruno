@@ -36,7 +36,7 @@ import {
   listPersonaProfitability,
   listRecentDailyMetrics
 } from "../db/metrics.js";
-import { cachedFetch, deleteCachedValue } from "../db/cache.js";
+import { cachedFetch, deleteCachedValue, getStoredCacheEntry, setCachedValue } from "../db/cache.js";
 import { cancelRetargetById, listAwayLeads } from "../db/retargets.js";
 import type { ReplyIntent } from "../types/domain.js";
 import { clearFailedJobs, getFailedJobGroups, retryLatestFailedJob } from "../db/ops.js";
@@ -50,6 +50,7 @@ import {
   listCrmLeadMessages,
   listCrmLeadsPage,
   listCrmMessagesPage,
+  listLatestCampaignNames,
   listRecentAgentActions,
   listSyncCheckpoints,
   recordAgentAction,
@@ -422,142 +423,166 @@ function campaignStatusLabel(status?: number) {
  * null when Instantly is unreachable — pages render without the live layer
  * instead of failing.
  */
+async function buildCampaignPulse(): Promise<CampaignPulse | null> {
+  const [campaigns, crmSummary, checkpoints, cohortStart] = await Promise.all([
+    listInstantlyCampaigns({ limit: 100 }),
+    getCrmSummary(),
+    listSyncCheckpoints(),
+    getLeadCohortStartDate()
+  ]);
+  if (campaigns.length === 0) return null;
+  // Selected by cohort, not by a hardcoded name list: campaign names change
+  // between cohorts, and matching a stale registry silently selects nothing
+  // and falls through to an arbitrary campaign. "MSFT hold" campaigns are
+  // excluded because they only park held-out leads and never send, so they
+  // would otherwise contribute zero-rows to every pulse-derived view.
+  const cohort = await getActiveCohort();
+  const personaCampaigns = cohort
+    ? campaigns.filter(
+        (campaign) =>
+          campaign.name.includes(`| C${cohort} `) && !campaign.name.includes("MSFT hold")
+      )
+    : campaigns.filter((campaign) =>
+        KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
+      );
+  const selected = personaCampaigns.length > 0 ? personaCampaigns : [campaigns[0]];
+
+  // Today's date in the campaigns' own sending timezone, not server/UTC —
+  // a send at 11pm UTC can already be "tomorrow" in America/Detroit.
+  const todayLocal = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Detroit" }).format(new Date());
+  const cohortStartLocal = cohortStart?.slice(0, 10);
+
+  const snapshots = await Promise.all(
+    selected.map(async (campaign) => {
+      const [detail, analytics, analyticsToday] = await Promise.allSettled([
+        getInstantlyCampaign(campaign.id),
+        // Scoped to the current lead cohort's start, not Instantly's
+        // lifetime-since-campaign-creation counter — every number derived
+        // from this (sent, replies, bounces, opens, clicks) should read
+        // as "since the last purge," not mixed with dead-cohort history.
+        cohortStartLocal
+          ? getCampaignAnalyticsOverview({ campaignId: campaign.id, startDate: cohortStartLocal, endDate: todayLocal })
+          : getCampaignAnalyticsOverview(campaign.id),
+        // Sourced live from Instantly, not our crm_messages mirror — the
+        // mirror can lag hours behind a backfill and would otherwise
+        // silently under-report "today" while it catches up.
+        getCampaignAnalyticsOverview({ campaignId: campaign.id, startDate: todayLocal, endDate: todayLocal })
+      ]);
+      return { campaign, detail, analytics, analyticsToday };
+    })
+  );
+  const senderEmails = [
+    ...new Set(
+      snapshots.flatMap((snapshot) =>
+        snapshot.detail.status === "fulfilled"
+          ? snapshot.detail.value.email_list ?? []
+          : snapshot.campaign.email_list ?? []
+      )
+    )
+  ];
+  const warmup = await Promise.allSettled([
+    senderEmails.length > 0 ? getWarmupAnalytics(senderEmails) : Promise.resolve([])
+  ]);
+  const details = snapshots
+    .filter((snapshot) => snapshot.detail.status === "fulfilled")
+    .map((snapshot) => (snapshot.detail as PromiseFulfilledResult<Awaited<ReturnType<typeof getInstantlyCampaign>>>).value);
+  const analytics = snapshots
+    .filter((snapshot) => snapshot.analytics.status === "fulfilled")
+    .map((snapshot) => (snapshot.analytics as PromiseFulfilledResult<Awaited<ReturnType<typeof getCampaignAnalyticsOverview>>>).value);
+  const leadSyncComplete = checkpoints.some(
+    (checkpoint) => checkpoint.stream === "crm.leads.full" && checkpoint.status === "ok" && checkpoint.last_success_at
+  );
+  const countsByCampaign = new Map(
+    crmSummary.campaigns.map((item) => [item.campaignId, item.total])
+  );
+  const dailyLimits = details
+    .map((detail) => (detail as unknown as { daily_limit?: number }).daily_limit)
+    .filter((limit): limit is number => typeof limit === "number");
+  const statuses = new Set(selected.map((campaign) => campaignStatusLabel(campaign.status)));
+  const personaRows = snapshots.flatMap((snapshot) => {
+    if (snapshot.analytics.status !== "fulfilled") return [];
+    const item = snapshot.analytics.value;
+    const detail = snapshot.detail.status === "fulfilled" ? snapshot.detail.value : snapshot.campaign;
+    const config = KINTA_PERSONA_CAMPAIGNS.find((entry) => entry.name === snapshot.campaign.name);
+    return [{
+      persona: config?.persona ?? snapshot.campaign.name,
+      contacted: item.contacted_count,
+      sent: item.emails_sent_count,
+      repliesUnique: item.reply_count_unique,
+      positiveReplies: item.total_interested,
+      meetings: item.total_meeting_booked,
+      opportunities: item.total_opportunities,
+      closed: item.total_closed,
+      bounces: item.bounced_count,
+      openTracking: detail.open_tracking,
+      linkTracking: detail.link_tracking,
+      clicks: item.link_click_count_unique ?? item.link_click_count,
+      totalLeads: leadSyncComplete ? countsByCampaign.get(snapshot.campaign.id) : undefined
+    }];
+  });
+
+  return {
+    campaignId: selected.length === 1 ? selected[0].id : undefined,
+    campaignName: selected.length === 1 ? selected[0].name : `Kinta Persona Portfolio (${selected.length} campaigns)`,
+    statusLabel: statuses.size === 1 ? [...statuses][0] : "mixed",
+    dailyLimit: dailyLimits.length === selected.length ? dailyLimits.reduce((sum, limit) => sum + limit, 0) : undefined,
+    openTracking: details.length === selected.length ? details.every((detail) => detail.open_tracking === true) : undefined,
+    linkTracking: details.length === selected.length ? details.every((detail) => detail.link_tracking === true) : undefined,
+    leadCount: leadSyncComplete
+      ? selected.reduce((sum, campaign) => sum + (countsByCampaign.get(campaign.id) ?? 0), 0)
+      : undefined,
+    leadCountCapped: false,
+    leadsRemaining: leadSyncComplete ? crmSummary.uncontacted : undefined,
+    cohortStartDate: cohortStartLocal,
+    sentToday: snapshots.reduce(
+      (sum, snapshot) => sum + (snapshot.analyticsToday.status === "fulfilled" ? snapshot.analyticsToday.value.emails_sent_count : 0),
+      0
+    ),
+    sent: analytics.reduce((sum, item) => sum + item.emails_sent_count, 0),
+    contacted: analytics.reduce((sum, item) => sum + item.contacted_count, 0),
+    opensUnique: analytics.reduce((sum, item) => sum + item.open_count_unique, 0),
+    clicks: analytics.reduce((sum, item) => sum + item.link_click_count, 0),
+    repliesUnique: analytics.reduce((sum, item) => sum + item.reply_count_unique, 0),
+    bounces: analytics.reduce((sum, item) => sum + item.bounced_count, 0),
+    unsubscribes: analytics.reduce((sum, item) => sum + item.unsubscribed_count, 0),
+    personas: personaRows,
+    inboxes:
+      warmup[0].status === "fulfilled"
+        ? warmup[0].value.map((w) => ({
+            email: w.email,
+            todaySent: w.today?.sent,
+            last7Sent: w.last7DaysSent,
+            landingRate: w.inboxLandingRate
+          }))
+        : []
+  };
+}
+
+const CAMPAIGN_PULSE_CACHE_KEY = "instantly:pulse:v3";
+const CAMPAIGN_PULSE_TTL_SECONDS = 300;
+const CAMPAIGN_PULSE_MAX_STALE_MS = 60 * 60 * 1000;
+let campaignPulseRefresh: Promise<void> | undefined;
+let nextCampaignPulseRefreshAt = 0;
+
+function refreshCampaignPulse() {
+  if (campaignPulseRefresh || Date.now() < nextCampaignPulseRefreshAt) return;
+  // A failed upstream call can take a while; do not restart it on every page view.
+  nextCampaignPulseRefreshAt = Date.now() + 30_000;
+  campaignPulseRefresh = buildCampaignPulse()
+    .then((pulse) => setCachedValue(CAMPAIGN_PULSE_CACHE_KEY, pulse, CAMPAIGN_PULSE_TTL_SECONDS))
+    .catch(() => undefined)
+    .finally(() => { campaignPulseRefresh = undefined; });
+}
+
+/** Serve recent cached data immediately while a single refresh runs in the background. */
 async function loadCampaignPulse(): Promise<CampaignPulse | null> {
   try {
-    return await cachedFetch<CampaignPulse | null>("instantly:pulse:v3", 300, async () => {
-      const [campaigns, crmSummary, checkpoints, cohortStart] = await Promise.all([
-        listInstantlyCampaigns({ limit: 100 }),
-        getCrmSummary(),
-        listSyncCheckpoints(),
-        getLeadCohortStartDate()
-      ]);
-      if (campaigns.length === 0) return null;
-      // Selected by cohort, not by a hardcoded name list: campaign names change
-      // between cohorts, and matching a stale registry silently selects nothing
-      // and falls through to an arbitrary campaign. "MSFT hold" campaigns are
-      // excluded because they only park held-out leads and never send, so they
-      // would otherwise contribute zero-rows to every pulse-derived view.
-      const cohort = await getActiveCohort();
-      const personaCampaigns = cohort
-        ? campaigns.filter(
-            (campaign) =>
-              campaign.name.includes(`| C${cohort} `) && !campaign.name.includes("MSFT hold")
-          )
-        : campaigns.filter((campaign) =>
-            KINTA_PERSONA_CAMPAIGNS.some((managed) => managed.name === campaign.name)
-          );
-      const selected = personaCampaigns.length > 0 ? personaCampaigns : [campaigns[0]];
-
-      // Today's date in the campaigns' own sending timezone, not server/UTC —
-      // a send at 11pm UTC can already be "tomorrow" in America/Detroit.
-      const todayLocal = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Detroit" }).format(new Date());
-      const cohortStartLocal = cohortStart?.slice(0, 10);
-
-      const snapshots = await Promise.all(
-        selected.map(async (campaign) => {
-          const [detail, analytics, analyticsToday] = await Promise.allSettled([
-            getInstantlyCampaign(campaign.id),
-            // Scoped to the current lead cohort's start, not Instantly's
-            // lifetime-since-campaign-creation counter — every number derived
-            // from this (sent, replies, bounces, opens, clicks) should read
-            // as "since the last purge," not mixed with dead-cohort history.
-            cohortStartLocal
-              ? getCampaignAnalyticsOverview({ campaignId: campaign.id, startDate: cohortStartLocal, endDate: todayLocal })
-              : getCampaignAnalyticsOverview(campaign.id),
-            // Sourced live from Instantly, not our crm_messages mirror — the
-            // mirror can lag hours behind a backfill and would otherwise
-            // silently under-report "today" while it catches up.
-            getCampaignAnalyticsOverview({ campaignId: campaign.id, startDate: todayLocal, endDate: todayLocal })
-          ]);
-          return { campaign, detail, analytics, analyticsToday };
-        })
-      );
-      const senderEmails = [
-        ...new Set(
-          snapshots.flatMap((snapshot) =>
-            snapshot.detail.status === "fulfilled"
-              ? snapshot.detail.value.email_list ?? []
-              : snapshot.campaign.email_list ?? []
-          )
-        )
-      ];
-      const warmup = await Promise.allSettled([
-        senderEmails.length > 0 ? getWarmupAnalytics(senderEmails) : Promise.resolve([])
-      ]);
-      const details = snapshots
-        .filter((snapshot) => snapshot.detail.status === "fulfilled")
-        .map((snapshot) => (snapshot.detail as PromiseFulfilledResult<Awaited<ReturnType<typeof getInstantlyCampaign>>>).value);
-      const analytics = snapshots
-        .filter((snapshot) => snapshot.analytics.status === "fulfilled")
-        .map((snapshot) => (snapshot.analytics as PromiseFulfilledResult<Awaited<ReturnType<typeof getCampaignAnalyticsOverview>>>).value);
-      const leadSyncComplete = checkpoints.some(
-        (checkpoint) => checkpoint.stream === "crm.leads.full" && checkpoint.status === "ok" && checkpoint.last_success_at
-      );
-      const countsByCampaign = new Map(
-        crmSummary.campaigns.map((item) => [item.campaignId, item.total])
-      );
-      const dailyLimits = details
-        .map((detail) => (detail as unknown as { daily_limit?: number }).daily_limit)
-        .filter((limit): limit is number => typeof limit === "number");
-      const statuses = new Set(selected.map((campaign) => campaignStatusLabel(campaign.status)));
-      const personaRows = snapshots.flatMap((snapshot) => {
-        if (snapshot.analytics.status !== "fulfilled") return [];
-        const item = snapshot.analytics.value;
-        const detail = snapshot.detail.status === "fulfilled" ? snapshot.detail.value : snapshot.campaign;
-        const config = KINTA_PERSONA_CAMPAIGNS.find((entry) => entry.name === snapshot.campaign.name);
-        return [{
-          persona: config?.persona ?? snapshot.campaign.name,
-          contacted: item.contacted_count,
-          sent: item.emails_sent_count,
-          repliesUnique: item.reply_count_unique,
-          positiveReplies: item.total_interested,
-          meetings: item.total_meeting_booked,
-          opportunities: item.total_opportunities,
-          closed: item.total_closed,
-          bounces: item.bounced_count,
-          openTracking: detail.open_tracking,
-          linkTracking: detail.link_tracking,
-          clicks: item.link_click_count_unique ?? item.link_click_count,
-          totalLeads: leadSyncComplete ? countsByCampaign.get(snapshot.campaign.id) : undefined
-        }];
-      });
-
-      return {
-        campaignId: selected.length === 1 ? selected[0].id : undefined,
-        campaignName: selected.length === 1 ? selected[0].name : `Kinta Persona Portfolio (${selected.length} campaigns)`,
-        statusLabel: statuses.size === 1 ? [...statuses][0] : "mixed",
-        dailyLimit: dailyLimits.length === selected.length ? dailyLimits.reduce((sum, limit) => sum + limit, 0) : undefined,
-        openTracking: details.length === selected.length ? details.every((detail) => detail.open_tracking === true) : undefined,
-        linkTracking: details.length === selected.length ? details.every((detail) => detail.link_tracking === true) : undefined,
-        leadCount: leadSyncComplete
-          ? selected.reduce((sum, campaign) => sum + (countsByCampaign.get(campaign.id) ?? 0), 0)
-          : undefined,
-        leadCountCapped: false,
-        leadsRemaining: leadSyncComplete ? crmSummary.uncontacted : undefined,
-        cohortStartDate: cohortStartLocal,
-        sentToday: snapshots.reduce(
-          (sum, snapshot) => sum + (snapshot.analyticsToday.status === "fulfilled" ? snapshot.analyticsToday.value.emails_sent_count : 0),
-          0
-        ),
-        sent: analytics.reduce((sum, item) => sum + item.emails_sent_count, 0),
-        contacted: analytics.reduce((sum, item) => sum + item.contacted_count, 0),
-        opensUnique: analytics.reduce((sum, item) => sum + item.open_count_unique, 0),
-        clicks: analytics.reduce((sum, item) => sum + item.link_click_count, 0),
-        repliesUnique: analytics.reduce((sum, item) => sum + item.reply_count_unique, 0),
-        bounces: analytics.reduce((sum, item) => sum + item.bounced_count, 0),
-        unsubscribes: analytics.reduce((sum, item) => sum + item.unsubscribed_count, 0),
-        personas: personaRows,
-        inboxes:
-          warmup[0].status === "fulfilled"
-            ? warmup[0].value.map((w) => ({
-                email: w.email,
-                todaySent: w.today?.sent,
-                last7Sent: w.last7DaysSent,
-                landingRate: w.inboxLandingRate
-              }))
-            : []
-      };
-    });
+    const entry = await getStoredCacheEntry<CampaignPulse | null>(CAMPAIGN_PULSE_CACHE_KEY);
+    const now = Date.now();
+    if (!entry || entry.expiresAt.getTime() <= now) refreshCampaignPulse();
+    return entry && now - entry.expiresAt.getTime() <= CAMPAIGN_PULSE_MAX_STALE_MS
+      ? entry.value
+      : null;
   } catch {
     return null;
   }
@@ -1114,8 +1139,8 @@ export async function registerDashboard(app: FastifyInstance) {
     const showAllHistory = query.all === "1";
     const cohortStart = showAllHistory ? undefined : await getLeadCohortStartDate();
     const from = showAllHistory ? explicitFrom : (explicitFrom ?? cohortStart?.slice(0, 10));
-    const [shell, result, summary, checkpoints, campaignsResult] = await Promise.all([
-      loadShellContext("activity", "Message activity", true),
+    const [shell, result, summary, checkpoints, campaignNames] = await Promise.all([
+      loadShellContext("activity", "Message activity", false),
       listCrmMessagesPage({
         page,
         pageSize: 50,
@@ -1128,9 +1153,8 @@ export async function registerDashboard(app: FastifyInstance) {
       }),
       getCrmMessageSummary(!showAllHistory && !explicitFrom ? cohortStart : undefined),
       listSyncCheckpoints(),
-      listInstantlyCampaigns({ limit: 100 }).catch(() => [])
+      listLatestCampaignNames()
     ]);
-    const campaignNames = new Map(campaignsResult.map((campaign) => [campaign.id, campaign.name]));
     const messageSync = checkpoints.find((checkpoint) => checkpoint.stream === "crm.messages.incremental");
     return reply.type("text/html").send(
       renderShell(
@@ -1420,7 +1444,7 @@ export async function registerDashboard(app: FastifyInstance) {
         afterState: after,
         providerResponse
       });
-      await deleteCachedValue("instantly:pulse:v2");
+      await deleteCachedValue(CAMPAIGN_PULSE_CACHE_KEY);
       return reply.send({ ok: true, campaign: after });
     } catch (error) {
       await recordAgentAction({
