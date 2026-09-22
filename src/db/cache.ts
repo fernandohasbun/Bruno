@@ -34,14 +34,45 @@ export async function deleteCachedValue(key: string) {
   await pool.query("DELETE FROM cached_records WHERE cache_key = $1", [key]);
 }
 
+/** Refreshes already running, so N concurrent readers trigger one upstream pass. */
+const inFlight = new Map<string, Promise<unknown>>();
+
+function refreshInBackground<T>(key: string, ttlSeconds: number, loader: () => Promise<T>) {
+  const existing = inFlight.get(key);
+  if (existing) return existing as Promise<T>;
+  const run = loader()
+    .then(async (fresh) => {
+      await setCachedValue(key, fresh, ttlSeconds);
+      return fresh;
+    })
+    .finally(() => {
+      inFlight.delete(key);
+    });
+  inFlight.set(key, run);
+  return run;
+}
+
 /**
- * Read-through cache: serve from cached_records, else run the loader and store.
- * Loader failures propagate — callers decide how to degrade.
+ * Read-through cache with stale-while-revalidate.
+ *
+ * Expired entries are served immediately while the refresh runs behind, because
+ * the upstream loaders are slow by design: Instantly calls queue against a
+ * shared 16/minute budget, and the campaign pulse alone costs ~17 of them. A
+ * blocking refresh made whoever arrived after the TTL wait out that whole
+ * queue. Only a cold cache with nothing stored blocks.
+ *
+ * Loader failures propagate on the blocking path; on the background path a
+ * failed refresh leaves the stale value in place rather than breaking the page.
  */
 export async function cachedFetch<T>(key: string, ttlSeconds: number, loader: () => Promise<T>): Promise<T> {
   const hit = await getCachedValue<T>(key);
   if (hit !== undefined) return hit;
-  const fresh = await loader();
-  await setCachedValue(key, fresh, ttlSeconds);
-  return fresh;
+
+  const stale = await getStoredCacheEntry<T>(key);
+  if (stale !== undefined) {
+    void refreshInBackground(key, ttlSeconds, loader).catch(() => undefined);
+    return stale.value;
+  }
+
+  return refreshInBackground(key, ttlSeconds, loader);
 }
